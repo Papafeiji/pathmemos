@@ -70,8 +70,8 @@ cd pathmemos
 可选项：
 
 - `AI_BASE_URL` / `AI_MODEL`：AI 服务配置
-- `WORKER_SECRET`：Cloudflare Worker 共享密钥（**开源版必须留空**；该密钥是 SaaS 官方 Worker 与源站之间的内部凭证，私有化部署无法也不应填写；若填写，所有经 Worker 路由的私有化流量会被后端 WorkerAuth 拒绝，返回 403）
-- `OPEN_API_KEY`：开源版与 Worker 之间的 API Key（脚本自动生成）
+- `WORKER_SECRET`：Cloudflare Worker 共享密钥（**开源版必须留空**；填错会导致小程序无法访问后端）
+- `OPEN_API_KEY`：后端 API Key（`init.sh` 自动生成），在小程序「开源版本」页面填写此 Key 即可切换后端
 - `CLOUDFLARE_TUNNEL_TOKEN`：Cloudflare Tunnel token（`install.sh` / `expose.sh` 自动写入）
 - `API_HOST`：后端公网地址（`install.sh` / `expose.sh` 自动写入）
 - `TRUSTED_PROXY_CIDR`：可信代理 CIDR（`init.sh` 默认写入 172.16.0.0/12、10.0.0.0/8、192.168.0.0/16、127.0.0.0/8 私网段）
@@ -81,9 +81,10 @@ cd pathmemos
 
 1. **微信支付**：回调固定指向 SaaS，开源版无法完成支付流程。小程序内付费购买入口已隐藏，但**免费 VIP 仍可正常领取**。
 2. **公众号客服**：微信回调 URL 唯一且指向 SaaS，开源版保留代码但无法接收消息。
-3. **MCP 入口**：开源版后端已直接暴露 `/mcp/*`，请使用 `https://<你的后端>/mcp`；`mcp.pathmemos.com` 固定指向 SaaS，不适合开源版。
+3. **MCP 入口**：部署后即可使用 `https://<你的后端>/mcp` 连接 MCP 客户端。
 4. **数据空间**：切换后端 = 全新数据空间，SaaS 数据不会自动迁移。
 5. **文件存储**：开源版使用本地磁盘，与 SaaS 的 OSS 不互通。
+6. **内置微信凭证风险**：开源版内置的 AppID/Secret 明文发布在公开仓库，存在被第三方滥用的可能。若滥用导致微信强制重置 Secret，SaaS 与所有使用内置凭证的开源部署的登录会同时中断。届时需按「更换自己的小程序」一节配置自有凭证恢复登录。
 
 ## 使用自有域名和证书（可选）
 
@@ -132,9 +133,7 @@ docker compose --profile https up -d caddy
 
 ### 为什么不需要配置微信小程序 AppID/Secret？
 
-开源版内置了与 SaaS 小程序一致的微信配置（明文内置在代码中，属公开信息），部署者无需填写。内置公共凭证是有意为之的低门槛设计。
-
-需要客观说明的风险：Secret 明文发布在公开仓库，可能被第三方滥用调用微信服务端 API。若滥用导致微信强制重置 Secret，SaaS 与所有使用内置凭证的开源部署的登录会同时中断；届时开源部署者需按「更换自己的小程序」一节配置自有 `WECHAT_APPID` / `WECHAT_SECRET` 恢复登录。
+开源版内置了微信凭证，部署者无需填写即可使用。但内置凭证属公开信息，详见上方「限制说明」中的风险提示。
 
 ### 切换 OPEN_API_KEY 后需要做什么？
 
