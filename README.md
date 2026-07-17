@@ -70,7 +70,6 @@ cd pathmemos
 可选项：
 
 - `AI_BASE_URL` / `AI_MODEL`：AI 服务配置
-- `WORKER_SECRET`：Cloudflare Worker 共享密钥（**开源版必须留空**；填错会导致小程序无法访问后端）
 - `OPEN_API_KEY`：后端 API Key（`init.sh` 自动生成），在小程序「开源版本」页面填写此 Key 即可切换后端
 - `CLOUDFLARE_TUNNEL_TOKEN`：Cloudflare Tunnel token（`install.sh` / `expose.sh` 自动写入）
 - `API_HOST`：后端公网地址（`install.sh` / `expose.sh` 自动写入）
@@ -84,7 +83,6 @@ cd pathmemos
 3. **MCP 入口**：部署后即可使用 `https://<你的后端>/mcp` 连接 MCP 客户端。
 4. **数据空间**：切换后端 = 全新数据空间，SaaS 数据不会自动迁移。
 5. **文件存储**：开源版使用本地磁盘，与 SaaS 的 OSS 不互通。
-6. **内置微信凭证风险**：开源版内置的 AppID/Secret 明文发布在公开仓库，存在被第三方滥用的可能。若滥用导致微信强制重置 Secret，SaaS 与所有使用内置凭证的开源部署的登录会同时中断。届时需按「更换自己的小程序」一节配置自有凭证恢复登录。
 
 ## 使用自有域名和证书（可选）
 
@@ -133,11 +131,11 @@ docker compose --profile https up -d caddy
 
 ### 为什么不需要配置微信小程序 AppID/Secret？
 
-开源版内置了微信凭证，部署者无需填写即可使用。但内置凭证属公开信息，详见上方「限制说明」中的风险提示。
+开源版内置了微信凭证，部署者无需填写即可使用。如需换成自己的小程序，参考「更换自己的小程序」一节。
 
 ### 切换 OPEN_API_KEY 后需要做什么？
 
-修改 `.env` 中的 `OPEN_API_KEY` 后重启应用（`docker compose up -d app`），启动时会自动同步到数据库。注意：通过 API Key 直接调用 REST API（curl / MCP）写入的数据归属独立的技术用户空间（内置用户 `open_default_user`），与小程序微信登录后的数据互不可见。
+修改 `.env` 中的 `OPEN_API_KEY` 后重启应用（`docker compose up -d app`），启动时会自动同步到数据库。注意：通过 API Key 直接调用（curl / MCP 客户端）写入的数据与小程序微信登录后的数据互不可见，数据归属不同的用户空间。
 
 ## 运维
 
@@ -169,7 +167,7 @@ docker compose exec postgres pg_dump -U papafeiji -d papafeiji > backup.sql
 
 ## 更换自己的小程序（可选）
 
-开源版内置了与 SaaS 小程序一致的微信 AppID/Secret（内置在代码中，属公开信息），部署者无需注册即可使用。但内置凭证属于公共凭证，**存在因 SaaS 运营调整而被重置的风险**，建议生产环境替换为自己的小程序：
+开源版内置了微信凭证，部署者无需注册即可使用。建议生产环境替换为自己的小程序：
 
 1. 在 [微信公众平台](https://mp.weixin.qq.com/) 注册小程序
 2. 获取 AppID 和 AppSecret
