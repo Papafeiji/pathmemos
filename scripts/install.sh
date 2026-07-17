@@ -14,6 +14,7 @@
 # Cloudflare API Token 权限要求（正式部署模式）：
 #   - Account: Account: Read
 #   - Account: Cloudflare Tunnel: Edit
+#   - Zone: Zone: Read
 #   - Zone: DNS: Edit
 
 set -eo pipefail
@@ -504,7 +505,7 @@ count_cf_zones() {
 }
 
 setup_cloudflare_tunnel_custom_domain() {
-	_gum_style_box "请提前准备好：1. Cloudflare API Token\n并配置好以下权限： Account:Read   Cloudflare Tunnel:Edit   Zone:DNS:Edit"
+	_gum_style_box "请提前准备好：1. Cloudflare API Token\n并配置好以下权限：\n  Account > Account: Read\n  Account > Cloudflare Tunnel: Edit\n  Zone > Zone: Read\n  Zone > DNS: Edit"
 
 	CLOUDFLARE_API_TOKEN=$(_gum_input --placeholder "Cloudflare API Token" --password)
 	if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
@@ -558,7 +559,7 @@ setup_cloudflare_tunnel_custom_domain() {
 		ui_info "请前往 https://dash.cloudflare.com 确认："
 		ui_info "  1. 已添加域名（Add a site）并将 NS 指向 Cloudflare"
 		ui_info "  2. 域名状态为 Active（Pending 需等待 NS 生效）"
-		ui_info "  3. API Token 的 Zone:Read 权限未限定特定域名"
+		ui_info "  3. API Token 需包含 Zone > Zone: Read 权限（在 Token 详情页添加）"
 		exit 1
 	fi
 
