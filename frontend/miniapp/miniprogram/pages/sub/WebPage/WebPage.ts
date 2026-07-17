@@ -1,5 +1,4 @@
 
-import { getSystemInfo } from '../../../utils/util';
 import themeBehavior from '../../../behaviors/theme';
 import i18nBehavior from '../../../behaviors/i18n';
 
@@ -23,13 +22,10 @@ Page({
 
   data: {
     url: '',
-    statusBarHeight: 20,
-    navBarHeight: 44,
   },
 
   onLoad(option) {
     this._isDestroyed = false;
-    this._initNavBar();
     let url = '';
     try {
       url = decodeURIComponent(option.url || '');
@@ -42,16 +38,6 @@ Page({
       return;
     }
     this._safeSetData({ url });
-  },
-
-  _initNavBar() {
-    const sysInfo = getSystemInfo();
-    const capsule = wx.getMenuButtonBoundingClientRect();
-    const statusBarHeight = sysInfo.statusBarHeight || 20;
-    const capsuleHeight = capsule.height || 32;
-    const capsuleTop = capsule.top || statusBarHeight + 6;
-    const navBarHeight = (capsuleTop - statusBarHeight) * 2 + capsuleHeight;
-    this._safeSetData({ statusBarHeight, navBarHeight });
   },
 
   onUnload() {
