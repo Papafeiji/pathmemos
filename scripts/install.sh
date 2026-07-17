@@ -489,12 +489,18 @@ cf_api() {
 fetch_cf_zones() {
 	local zones_resp
 	zones_resp=$(cf_api GET "/zones?per_page=50")
-	if ! echo "$zones_resp" | jq -e '.success == true and .result != null' >/dev/null 2>&1; then
-		ui_error "获取 Cloudflare Zone 列表失败" >&2
-		ui_info "请确认 API Token 具备 Zone:Read 权限，且账号下已添加对应域名" >&2
-		exit 1
+	if ! echo "$zones_resp" | jq -e '.success' >/dev/null 2>&1; then
+		echo ""
+		return 0
 	fi
-	echo "$zones_resp" | jq -r '.result[] | "\(.name) \(.id)"'
+	echo "$zones_resp" | jq -r '.result // [] | .[] | "\(.name) \(.id)"'
+}
+
+count_cf_zones() {
+	local zones_resp count
+	zones_resp=$(cf_api GET "/zones?per_page=50")
+	count=$(echo "$zones_resp" | jq -r 'try (.result | length) // 0' 2>/dev/null || echo "0")
+	echo "${count:-0}"
 }
 
 setup_cloudflare_tunnel_custom_domain() {
@@ -545,18 +551,23 @@ setup_cloudflare_tunnel_custom_domain() {
 
 	# 从 Cloudflare 列出用户的所有域名，让用户选择，无需手动输入完整域名
 	ui_info "获取 Cloudflare Zone 列表..."
+	local zone_count
+	zone_count=$(count_cf_zones)
+	if [[ "$zone_count" -eq 0 ]]; then
+		ui_error "当前 Cloudflare 账号下没有域名"
+		ui_info "请前往 https://dash.cloudflare.com 确认："
+		ui_info "  1. 已添加域名（Add a site）并将 NS 指向 Cloudflare"
+		ui_info "  2. 域名状态为 Active（Pending 需等待 NS 生效）"
+		ui_info "  3. API Token 的 Zone:Read 权限未限定特定域名"
+		exit 1
+	fi
+
 	local zones_data zone_names=() zone_ids=() zone_name zone_id_entry
 	while IFS=' ' read -r zone_name zone_id_entry; do
 		[[ -z "$zone_name" ]] && continue
 		zone_names+=("$zone_name")
 		zone_ids+=("$zone_id_entry")
 	done <<< "$(fetch_cf_zones)"
-
-	if [[ ${#zone_names[@]} -eq 0 ]]; then
-		ui_error "当前 Cloudflare 账号下没有域名"
-		ui_info "请先在 Cloudflare 添加域名（Add a site）并将 NS 指向 Cloudflare"
-		exit 1
-	fi
 
 	local chosen_zone
 	chosen_zone=$(_gum_choose --header "选择你要使用的域名" "${zone_names[@]}")
