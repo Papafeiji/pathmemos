@@ -637,15 +637,29 @@ func (s *Service) CreateMemory(ctx context.Context, userID, title, content strin
 	}
 	t := recordTime.In(timeutil.Shanghai)
 	recordDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-	if _, err := s.pool.Queries().CreateMemory(ctx, sqlc.CreateMemoryParams{
-		ID:         id,
-		UserID:     userID,
-		RecordTime: pgtype.Timestamptz{Time: recordTime, Valid: true},
-		RecordDate: pgtype.Date{Time: recordDate, Valid: true},
-		Title:      title,
-		Content:    content,
-	}); err != nil {
-		return "", fmt.Errorf("create memory: %w", err)
+	recordDateTime := pgtype.Date{Time: recordDate, Valid: true}
+	err = db.WithTx(ctx, s.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
+		if _, err := q.CreateMemory(ctx, sqlc.CreateMemoryParams{
+			ID:         id,
+			UserID:     userID,
+			RecordTime: pgtype.Timestamptz{Time: recordTime, Valid: true},
+			RecordDate: recordDateTime,
+			Title:      title,
+			Content:    content,
+		}); err != nil {
+			return fmt.Errorf("create memory: %w", err)
+		}
+		if _, err := q.UpsertDiary(ctx, sqlc.UpsertDiaryParams{
+			ID:         id,
+			UserID:     userID,
+			RecordDate: recordDateTime,
+		}); err != nil {
+			return fmt.Errorf("upsert diary for memory: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 	return id, nil
 }
@@ -672,17 +686,66 @@ func (s *Service) UpdateMemory(ctx context.Context, userID, memoryID, title, con
 }
 
 func (s *Service) DeleteMemory(ctx context.Context, userID, memoryID string) error {
-	rows, err := s.pool.Queries().DeleteMemory(ctx, sqlc.DeleteMemoryParams{
+	memory, err := s.pool.Queries().GetMemory(ctx, sqlc.GetMemoryParams{
 		ID:     memoryID,
 		UserID: userID,
 	})
 	if err != nil {
-		return fmt.Errorf("delete memory: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrMemoryNotFound
+		}
+		return fmt.Errorf("get memory: %w", err)
 	}
-	if rows == 0 {
-		return ErrMemoryNotFound
-	}
-	return nil
+
+	err = db.WithTx(ctx, s.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
+		rows, err := q.DeleteMemory(ctx, sqlc.DeleteMemoryParams{
+			ID:     memoryID,
+			UserID: userID,
+		})
+		if err != nil {
+			return fmt.Errorf("delete memory: %w", err)
+		}
+		if rows == 0 {
+			return ErrMemoryNotFound
+		}
+
+		diary, err := q.GetDiaryByUserAndDate(ctx, sqlc.GetDiaryByUserAndDateParams{
+			UserID:     userID,
+			RecordDate: memory.RecordDate,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return fmt.Errorf("get diary: %w", err)
+		}
+
+		entryCount, err := q.CountDiaryEntriesByDiaryID(ctx, diary.ID)
+		if err != nil {
+			return fmt.Errorf("count diary entries: %w", err)
+		}
+		if entryCount > 0 {
+			return nil
+		}
+
+		memCount, err := q.CountMemoriesByUserAndDate(ctx, sqlc.CountMemoriesByUserAndDateParams{
+			UserID:  userID,
+			Column2: memory.RecordDate,
+		})
+		if err != nil {
+			return fmt.Errorf("count memories: %w", err)
+		}
+		if memCount > 0 {
+			return nil
+		}
+
+		_, err = q.DeleteDiaryAndEntriesReturningFileIDs(ctx, diary.ID)
+		if err != nil {
+			return fmt.Errorf("delete empty diary: %w", err)
+		}
+		return nil
+	})
+	return err
 }
 
 func (s *Service) UpdateCover(ctx context.Context, userID, familyID, recordDate string, coverImage pgtype.Text) (err error) {
@@ -875,6 +938,13 @@ func (s *Service) DeleteDiary(ctx context.Context, userID, familyID, recordDate 
 	var fileIDs []string
 	if err := db.WithTx(ctx, s.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
 		var err error
+		// 将当日 memories 一并清除，与 entries 保持一致：日记卡片删除即该日所有数据删除。
+		if _, err := q.DeleteMemoriesByUserAndDate(ctx, sqlc.DeleteMemoriesByUserAndDateParams{
+			UserID:  userID,
+			Column2: recordDateTime,
+		}); err != nil {
+			return fmt.Errorf("delete memories: %w", err)
+		}
 		// 在事务内先锁定日记行、再删除图片关联并返回 file_id，最后删除日记。
 		// FOR UPDATE 阻止并发创建条目，确保返回的 file_id 与实际被级联删除的图片完全一致，
 		// 避免并发新增的图片条目被级联删除但其 fileID 未清理封面引用。
@@ -1232,15 +1302,26 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, entryID string) (fami
 		if err := q.TouchDiaryUpdatedAt(ctx, entry.DiaryID); err != nil {
 			return fmt.Errorf("touch diary updated at: %w", err)
 		}
-		count, err := q.CountDiaryEntriesByDiaryID(ctx, entry.DiaryID)
+		entryCount, err := q.CountDiaryEntriesByDiaryID(ctx, entry.DiaryID)
 		if err != nil {
 			return fmt.Errorf("count diary entries: %w", err)
 		}
-		if count == 0 {
-			_, err := q.DeleteDiaryAndEntriesReturningFileIDs(ctx, entry.DiaryID)
-			if err != nil {
-				return fmt.Errorf("delete empty diary: %w", err)
-			}
+		if entryCount > 0 {
+			return nil
+		}
+		memCount, err := q.CountMemoriesByUserAndDate(ctx, sqlc.CountMemoriesByUserAndDateParams{
+			UserID:  diary.UserID,
+			Column2: diary.RecordDate,
+		})
+		if err != nil {
+			return fmt.Errorf("count memories: %w", err)
+		}
+		if memCount > 0 {
+			return nil
+		}
+		_, err = q.DeleteDiaryAndEntriesReturningFileIDs(ctx, entry.DiaryID)
+		if err != nil {
+			return fmt.Errorf("delete empty diary: %w", err)
 		}
 		return nil
 	})

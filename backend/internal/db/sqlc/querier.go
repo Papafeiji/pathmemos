@@ -35,6 +35,7 @@ type Querier interface {
 	CountFamilyDailyCovers(ctx context.Context, familyID string) (int64, error)
 	CountFamilyMembers(ctx context.Context, familyID string) (int64, error)
 	CountInviterMonthlyRewardDays(ctx context.Context, arg CountInviterMonthlyRewardDaysParams) (int32, error)
+	CountMemoriesByUserAndDate(ctx context.Context, arg CountMemoriesByUserAndDateParams) (int64, error)
 	CountSysConfig(ctx context.Context) (int64, error)
 	CountWeeklyDiaryEntriesByUsers(ctx context.Context, arg CountWeeklyDiaryEntriesByUsersParams) (int64, error)
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (CreateAPIKeyRow, error)
@@ -65,6 +66,7 @@ type Querier interface {
 	DeleteFamilyMembers(ctx context.Context, familyID string) error
 	DeleteFamilyMembership(ctx context.Context, arg DeleteFamilyMembershipParams) error
 	DeleteFile(ctx context.Context, id string) error
+	DeleteMemoriesByUserAndDate(ctx context.Context, arg DeleteMemoriesByUserAndDateParams) (int64, error)
 	DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int64, error)
 	DeleteOldDialogLogs(ctx context.Context, dollar_1 int64) (int64, error)
 	DeleteStaleTrajectories(ctx context.Context, dollar_1 int64) (int64, error)
@@ -95,6 +97,7 @@ type Querier interface {
 	// 选择当日最新图片日记作为 image 优先级封面。
 	// 排序语义：用户手动排序（sort_order 越小越靠前） > 日记记录时间 > 图片上传时间。
 	GetLatestImageEntry(ctx context.Context, arg GetLatestImageEntryParams) (GetLatestImageEntryRow, error)
+	GetMemory(ctx context.Context, arg GetMemoryParams) (Memory, error)
 	GetOrderByOutTradeNo(ctx context.Context, outTradeNo string) (Order, error)
 	GetSysConfig(ctx context.Context) (SysConfig, error)
 	GetUserAvatarMarker(ctx context.Context, userID string) (GetUserAvatarMarkerRow, error)

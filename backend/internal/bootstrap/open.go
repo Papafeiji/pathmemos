@@ -111,7 +111,10 @@ func SeedOpenBackend(ctx context.Context, cfg *config.Config, pool *db.Pool, ses
 					Valid: true,
 				},
 			})
-			return err
+			if err != nil {
+				return fmt.Errorf("create open api key: %w", err)
+			}
+			return nil
 		}); txErr != nil {
 			return fmt.Errorf("sync open api key: %w", txErr)
 		}

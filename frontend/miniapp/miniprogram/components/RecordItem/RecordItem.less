@@ -24,11 +24,7 @@
   &.isTouchLeft {
     transform: translateX(-170rpx);
 
-[data-theme="dark"] .nav-btn .nav-icon {
-  filter: brightness(0) invert(1);
-}
-
-.del-container {
+    .del-container {
       opacity: 1;
     }
   }
@@ -116,6 +112,7 @@
       width: 24rpx;
       height: 24rpx;
       display: block;
+      filter: var(--ppfj-nav-icon-filter, none);
     }
 
     &:active {

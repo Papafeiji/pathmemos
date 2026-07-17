@@ -376,7 +376,7 @@ func (h *Handler) handlePromptsGet(req jsonRPCRequest) *jsonRPCResponse {
 		desc = "将AI助手本地生成的记忆记录上报到记忆助手"
 		text = memorySyncPrompt
 	case "memory-digest":
-		desc = "汇总当日聊天记录或外部转发文本，生成记忆草稿"
+		desc = "汇总用户当天的聊天记录或外部转发文本，生成结构化的记忆草稿并存储本地"
 		text = memoryDigestPrompt
 	default:
 		return jsonRPCErrorResponse(req.ID, -32602, "prompt not found")

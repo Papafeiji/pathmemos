@@ -561,15 +561,29 @@ func (h *Handler) createMemoryForUser(ctx context.Context, userID string, req cr
 	}
 	t := req.RecordTime.In(timeutil.Shanghai)
 	recordDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-	if _, err := h.pool.Queries().CreateMemory(ctx, sqlc.CreateMemoryParams{
-		ID:         id,
-		UserID:     userID,
-		RecordTime: pgtype.Timestamptz{Time: req.RecordTime, Valid: true},
-		RecordDate: pgtype.Date{Time: recordDate, Valid: true},
-		Title:      req.Title,
-		Content:    req.Content,
-	}); err != nil {
-		return "", fmt.Errorf("create memory: %w", err)
+	recordDateTime := pgtype.Date{Time: recordDate, Valid: true}
+	err = db.WithTx(ctx, h.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
+		if _, err := q.CreateMemory(ctx, sqlc.CreateMemoryParams{
+			ID:         id,
+			UserID:     userID,
+			RecordTime: pgtype.Timestamptz{Time: req.RecordTime, Valid: true},
+			RecordDate: recordDateTime,
+			Title:      req.Title,
+			Content:    req.Content,
+		}); err != nil {
+			return fmt.Errorf("create memory: %w", err)
+		}
+		if _, err := q.UpsertDiary(ctx, sqlc.UpsertDiaryParams{
+			ID:         id,
+			UserID:     userID,
+			RecordDate: recordDateTime,
+		}); err != nil {
+			return fmt.Errorf("upsert diary for memory: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 	// 创建成功后尽力失效该用户的 MCP 查询缓存；失败由 TTL 兜底。
 	h.invalidateMcpCache(ctx, userID)

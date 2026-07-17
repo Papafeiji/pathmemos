@@ -11,6 +11,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countMemoriesByUserAndDate = `-- name: CountMemoriesByUserAndDate :one
+SELECT COUNT(*) FROM memories WHERE user_id = $1 AND record_date = $2::date
+`
+
+type CountMemoriesByUserAndDateParams struct {
+	UserID  string      `json:"userId"`
+	Column2 pgtype.Date `json:"column2"`
+}
+
+func (q *Queries) CountMemoriesByUserAndDate(ctx context.Context, arg CountMemoriesByUserAndDateParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countMemoriesByUserAndDate, arg.UserID, arg.Column2)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createMemory = `-- name: CreateMemory :one
 INSERT INTO memories (id, user_id, record_time, record_date, title, content, created_at)
 VALUES ($1, $2, $3, $4, $5, $6, now())
@@ -48,6 +64,23 @@ func (q *Queries) CreateMemory(ctx context.Context, arg CreateMemoryParams) (Mem
 	return i, err
 }
 
+const deleteMemoriesByUserAndDate = `-- name: DeleteMemoriesByUserAndDate :execrows
+DELETE FROM memories WHERE user_id = $1 AND record_date = $2::date
+`
+
+type DeleteMemoriesByUserAndDateParams struct {
+	UserID  string      `json:"userId"`
+	Column2 pgtype.Date `json:"column2"`
+}
+
+func (q *Queries) DeleteMemoriesByUserAndDate(ctx context.Context, arg DeleteMemoriesByUserAndDateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteMemoriesByUserAndDate, arg.UserID, arg.Column2)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteMemory = `-- name: DeleteMemory :execrows
 DELETE FROM memories WHERE id = $1 AND user_id = $2
 `
@@ -63,6 +96,31 @@ func (q *Queries) DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const getMemory = `-- name: GetMemory :one
+SELECT id, user_id, record_time, record_date, title, content, created_at
+FROM memories WHERE id = $1 AND user_id = $2
+`
+
+type GetMemoryParams struct {
+	ID     string `json:"id"`
+	UserID string `json:"userId"`
+}
+
+func (q *Queries) GetMemory(ctx context.Context, arg GetMemoryParams) (Memory, error) {
+	row := q.db.QueryRow(ctx, getMemory, arg.ID, arg.UserID)
+	var i Memory
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.RecordTime,
+		&i.RecordDate,
+		&i.Title,
+		&i.Content,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const listMemoriesByDateRange = `-- name: ListMemoriesByDateRange :many
