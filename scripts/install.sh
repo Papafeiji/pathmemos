@@ -486,33 +486,15 @@ cf_api() {
   curl "${args[@]}" "https://api.cloudflare.com/client/v4$path" || echo '{"success":false,"errors":[{"message":"请求失败，请检查网络或 Token"}]}'
 }
 
-select_cf_zone() {
-	local hostname="$1"
-	# 注意：本函数被 $() 捕获 stdout，所有 UI 输出必须走 stderr，只有 zone_id 走 stdout
-	ui_info "查找 Cloudflare Zone..." >&2
-	local zones_resp zones zone_id=""
+fetch_cf_zones() {
+	local zones_resp
 	zones_resp=$(cf_api GET "/zones?per_page=50")
-	# Token 无 Zone 读取权限时 .result 为 null，直接解析会无声失败
 	if ! echo "$zones_resp" | jq -e '.success == true and .result != null' >/dev/null 2>&1; then
 		ui_error "获取 Cloudflare Zone 列表失败" >&2
 		ui_info "请确认 API Token 具备 Zone:Read 权限，且账号下已添加对应域名" >&2
 		exit 1
 	fi
-	zones=$(echo "$zones_resp" | jq -r '.result[] | "\(.name) \(.id)"')
-	local zone_name zone_candidate
-	while IFS=' ' read -r zone_name zone_candidate; do
-		[[ -z "$zone_name" ]] && continue
-		if [[ "$hostname" == "$zone_name" || "$hostname" == *".${zone_name}" ]]; then
-			zone_id="$zone_candidate"
-			break
-		fi
-	done <<< "$zones"
-	if [[ -z "$zone_id" ]]; then
-		ui_error "未找到 ${hostname} 对应的 Cloudflare Zone" >&2
-		ui_info "请确认该域名已添加到 Cloudflare 并使用 Cloudflare 名称服务器" >&2
-		exit 1
-	fi
-	echo "$zone_id"
+	echo "$zones_resp" | jq -r '.result[] | "\(.name) \(.id)"'
 }
 
 setup_cloudflare_tunnel_custom_domain() {
@@ -561,19 +543,46 @@ setup_cloudflare_tunnel_custom_domain() {
 	fi
 	ui_success "使用账号: $account_name"
 
-	# 先收集并校验域名/Zone，全部通过后再创建 Tunnel，
-	# 避免中途退出留下孤儿 Tunnel（tunnel 名含时间戳，重跑会累积）
-	local hostname
-	hostname=$(_gum_input --placeholder "自定义域名，例如 api.example.com")
-	if [[ -z "$hostname" ]]; then
-		ui_error "域名不能为空"
+	# 从 Cloudflare 列出用户的所有域名，让用户选择，无需手动输入完整域名
+	ui_info "获取 Cloudflare Zone 列表..."
+	local zones_data zone_names=() zone_ids=() zone_name zone_id_entry
+	while IFS=' ' read -r zone_name zone_id_entry; do
+		[[ -z "$zone_name" ]] && continue
+		zone_names+=("$zone_name")
+		zone_ids+=("$zone_id_entry")
+	done <<< "$(fetch_cf_zones)"
+
+	if [[ ${#zone_names[@]} -eq 0 ]]; then
+		ui_error "当前 Cloudflare 账号下没有域名"
+		ui_info "请先在 Cloudflare 添加域名（Add a site）并将 NS 指向 Cloudflare"
 		exit 1
 	fi
 
-	local zone_id
-	zone_id=$(select_cf_zone "$hostname")
-	ui_success "Zone ID: $zone_id"
+	local chosen_zone
+	chosen_zone=$(_gum_choose --header "选择你要使用的域名" "${zone_names[@]}")
+	local zone_id zone_idx
+	for zone_idx in "${!zone_names[@]}"; do
+		if [[ "${zone_names[$zone_idx]}" == "$chosen_zone" ]]; then
+			zone_id="${zone_ids[$zone_idx]}"
+			break
+		fi
+	done
+	ui_success "使用域名: $chosen_zone"
 
+	# 询问子域名前缀，留空则使用根域名
+	local prefix
+	prefix=$(_gum_input --placeholder "子域名前缀（留空则使用根域名 ${chosen_zone}）" --value "memos")
+
+	local hostname
+	if [[ -z "$prefix" ]]; then
+		hostname="$chosen_zone"
+	else
+		hostname="${prefix}.${chosen_zone}"
+	fi
+	ui_info "将配置域名: $hostname"
+
+	# 先收集并校验域名/Zone，全部通过后再创建 Tunnel，
+	# 避免中途退出留下孤儿 Tunnel（tunnel 名含时间戳，重跑会累积）
 	ui_info "创建 Cloudflare Tunnel..."
 	local tunnel_name tunnel_resp tunnel_id tunnel_token
 	tunnel_name="pathmemos-open-$(date +%s)"
@@ -599,9 +608,17 @@ setup_cloudflare_tunnel_custom_domain() {
 		ui_success "Tunnel ingress 配置完成"
 	fi
 
+	# DNS 记录名：子域名直接用前缀，根域名用 @
+	local dns_name
+	if [[ -z "$prefix" ]]; then
+		dns_name="@"
+	else
+		dns_name="$prefix"
+	fi
+
 	ui_info "添加 DNS CNAME 记录..."
 	local dns_resp
-	dns_resp=$(cf_api POST "/zones/$zone_id/dns_records" "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${tunnel_id}.cfargotunnel.com\",\"proxied\":true,\"comment\":\"PathMemos Open\"}")
+	dns_resp=$(cf_api POST "/zones/$zone_id/dns_records" "{\"type\":\"CNAME\",\"name\":\"${dns_name}\",\"content\":\"${tunnel_id}.cfargotunnel.com\",\"proxied\":true,\"comment\":\"PathMemos Open\"}")
 	if ! echo "$dns_resp" | jq -e '.success' >/dev/null 2>&1; then
 		local err_msg
 		err_msg=$(echo "$dns_resp" | jq -r '.errors[0].message // "未知错误"')
