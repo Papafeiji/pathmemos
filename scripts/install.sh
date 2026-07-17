@@ -3,6 +3,8 @@
 #
 # 用法：
 # curl -fsSL https://raw.githubusercontent.com/Papafeiji/pathmemos/open/scripts/install.sh | bash
+# 国内用户可选：
+#   PATHMEMOS_MIRROR=gitee bash -c "$(curl -fsSL https://gitee.com/wowproton/path-memos/raw/open/scripts/install.sh)"
 #
 # 前置准备：
 #   - 一台 Linux 服务器（建议 Ubuntu 22.04+，需 apt 包管理器）
@@ -25,6 +27,12 @@ PATHMEMOS_BRANCH="open"
 PATHMEMOS_DIR="${PATHMEMOS_DIR:-/opt/pathmemos}"
 GUM_VERSION="${PATHMEMOS_GUM_VERSION:-0.15.2}"
 
+# 国内镜像：设置 PATHMEMOS_MIRROR=gitee 后，所有 GitHub 下载自动 fallback 到 Gitee
+if [[ "${PATHMEMOS_MIRROR:-github}" == "gitee" ]]; then
+  PATHMEMOS_REPO="https://gitee.com/wowproton/path-memos.git"
+  PATHMEMOS_BRANCH="open"
+fi
+
 USE_SUDO=""
 
 # 支持 curl | bash 管道执行：此时 $0 不是脚本路径，本地无 lib/ui.sh，从仓库下载后加载。
@@ -36,7 +44,10 @@ else
   # 脚本退出时统一清理下载的 ui.sh 临时文件
   trap 'rm -f "$_ui_tmp"' EXIT
   _ui_raw_url="https://raw.githubusercontent.com/Papafeiji/pathmemos/${PATHMEMOS_BRANCH}/scripts/lib/ui.sh"
+  _ui_fallback_url="https://gitee.com/wowproton/path-memos/raw/${PATHMEMOS_BRANCH}/scripts/lib/ui.sh"
   if curl -fsSL --retry 2 --connect-timeout 5 --max-time 20 "$_ui_raw_url" -o "$_ui_tmp"; then
+    source "$_ui_tmp"
+  elif [[ "$_ui_raw_url" != "$_ui_fallback_url" ]] && curl -fsSL --retry 2 --connect-timeout 5 --max-time 20 "$_ui_fallback_url" -o "$_ui_tmp"; then
     source "$_ui_tmp"
   else
     echo "无法下载远程代码仓库（$_ui_raw_url）。" >&2
@@ -413,7 +424,7 @@ clone_repo() {
     if ! timeout 180 run_as_root git clone -b "$PATHMEMOS_BRANCH" --depth 1 "$PATHMEMOS_REPO" "$PATHMEMOS_DIR"; then
       ui_error "代码下载失败"
       ui_info "请检查服务器能否访问 GitHub，或尝试:"
-      ui_info "  git clone -b open https://github.com/Papafeiji/pathmemos.git ${PATHMEMOS_DIR}"
+      ui_info "  PATHMEMOS_MIRROR=gitee bash -c \"\$(curl -fsSL https://gitee.com/wowproton/path-memos/raw/open/scripts/install.sh)\""
       exit 1
     fi
     run_as_root chown -R "$(whoami)" "$PATHMEMOS_DIR" 2>/dev/null || true
@@ -730,10 +741,14 @@ start_cloudflared() {
 			esac
 			local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
 			if ! run_as_root timeout 60 curl -fsSL -o "$cloudflared_bin" "$url"; then
-				ui_error "下载 cloudflared 二进制失败"
-				ui_info "请手动从 GitHub Releases 下载:"
-				ui_info "  ${url}"
-				exit 1
+				ui_warn "GitHub 下载失败，尝试 Gitee 镜像..."
+				local gitee_url="https://gitee.com/wowproton/path-memos/raw/open/deploy/assets/cloudflared-linux-${arch}"
+				if ! run_as_root timeout 60 curl -fsSL -o "$cloudflared_bin" "$gitee_url"; then
+					ui_error "下载 cloudflared 二进制失败"
+					ui_info "请手动从 GitHub Releases 下载:"
+					ui_info "  ${url}"
+					exit 1
+				fi
 			fi
 			run_as_root chmod +x "$cloudflared_bin"
 		fi
