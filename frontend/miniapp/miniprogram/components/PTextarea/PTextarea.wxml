@@ -1,0 +1,24 @@
+
+<view class="PTextarea">
+  <view class="textarea-scroll-wrapper">
+    <view wx:if="{{!disabled}}" class="p-textarea-wrapper">
+      <textarea id="PTextareaInput" class="p-textarea-input" auto-height value="{{data}}" bindinput="onInput" maxlength="{{maxlength}}" />
+      <text wx:if="{{!data}}" class="p-textarea-placeholder-overlay">{{_i18n['pTextarea.placeholder']}}</text>
+    </view>
+    <view wx:if="{{disabled}}" class="p-textarea-input p-textarea-input--readonly">
+      <text wx:if="{{data}}">{{data}}</text>
+      <text wx:if="{{!data}}" class="p-textarea-placeholder">{{_i18n['pTextarea.placeholder']}}</text>
+    </view>
+  </view>
+  <view class="image-list">
+    <block wx:for="{{imageList}}" wx:key="path">
+      <view class="img" wx:if="{{item.type != FILE_TYPE.DELETE}}">
+        <image class="img-preview" mode="aspectFill" src="{{item.path}}" data-src="{{item.path}}" lazy-load />
+        <image class="del" src="../../image/del.png" data-index="{{index}}" bindtap="handleDel" />
+      </view>
+    </block>
+  </view>
+    <text class="len">{{data.length}}/{{maxlength}}</text>
+    <text class="iconfont ppfjtianjiatupian" bindtap="handleImage"></text>
+</view>
+

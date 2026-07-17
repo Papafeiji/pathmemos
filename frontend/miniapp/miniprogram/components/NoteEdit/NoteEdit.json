@@ -1,0 +1,12 @@
+{
+  "component": true,
+  "styleIsolation": "apply-shared",
+  "usingComponents": {
+    "AutoBtn": "/components/AutoBtn/AutoBtn",
+    "Drawer": "/components/Drawer/Drawer",
+    "PTextarea": "/components/PTextarea/PTextarea",
+    "CalendarPicker": "/components/CalendarPicker/CalendarPicker",
+    "TimePicker": "/components/TimePicker/TimePicker",
+    "ConfirmDialog": "/components/ConfirmDialog/ConfirmDialog"
+  }
+}

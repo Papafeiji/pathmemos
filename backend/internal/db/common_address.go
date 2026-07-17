@@ -1,0 +1,83 @@
+package db
+
+import (
+	"context"
+	"fmt"
+
+	"papafeiji/backend/internal/db/sqlc"
+
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+const commonAddressMaxCount = 10
+
+func SummarizeUserCommonAddresses(ctx context.Context, pool *Pool, userID string) error {
+	needsRefresh, err := pool.Queries().NeedsCommonAddressRefresh(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("check refresh needed: %w", err)
+	}
+	if !needsRefresh.Bool {
+		return nil
+	}
+	return summarizeUserCommonAddresses(ctx, pool, userID)
+}
+
+func summarizeUserCommonAddresses(ctx context.Context, pool *Pool, userID string) error {
+	top, err := pool.Queries().ListTopAddressesByUser(ctx, sqlc.ListTopAddressesByUserParams{
+		CreatedBy: userID,
+		Limit:     commonAddressMaxCount,
+	})
+	if err != nil {
+		return fmt.Errorf("list top addresses: %w", err)
+	}
+
+	if len(top) == 0 {
+		if err := pool.Queries().DeleteUserCommonAddresses(ctx, userID); err != nil {
+			return fmt.Errorf("delete empty common addresses: %w", err)
+		}
+		return nil
+	}
+
+	userIDs := make([]string, 0, len(top))
+	names := make([]string, 0, len(top))
+	lats := make([]pgtype.Numeric, 0, len(top))
+	lons := make([]pgtype.Numeric, 0, len(top))
+	counts := make([]int32, 0, len(top))
+
+	for _, row := range top {
+		if !row.Name.Valid || row.Name.String == "" {
+			continue
+		}
+		coord, err := pool.Queries().GetLatestCoordinateByAddress(ctx, sqlc.GetLatestCoordinateByAddressParams{
+			CreatedBy: userID,
+			Address:   row.Name,
+		})
+		if err != nil {
+			return fmt.Errorf("get latest coordinate for %q: %w", row.Name.String, err)
+		}
+		userIDs = append(userIDs, userID)
+		names = append(names, row.Name.String)
+		lats = append(lats, coord.Lat)
+		lons = append(lons, coord.Lon)
+		counts = append(counts, int32(row.Count))
+	}
+
+	return WithTx(ctx, pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
+		if err := q.DeleteUserCommonAddresses(ctx, userID); err != nil {
+			return fmt.Errorf("delete old common addresses: %w", err)
+		}
+		if len(names) == 0 {
+			return nil
+		}
+		if err := q.InsertUserCommonAddresses(ctx, sqlc.InsertUserCommonAddressesParams{
+			UserIds: userIDs,
+			Names:   names,
+			Lats:    lats,
+			Lons:    lons,
+			Counts:  counts,
+		}); err != nil {
+			return fmt.Errorf("insert common addresses: %w", err)
+		}
+		return nil
+	})
+}

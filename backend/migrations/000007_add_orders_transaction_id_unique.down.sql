@@ -1,0 +1,2 @@
+-- no-op: baseline already contains equivalent unique index; up migration did not create anything new.
+-- DOWN migration intentionally left blank.

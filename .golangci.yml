@@ -1,0 +1,39 @@
+version: "2"
+run:
+  go: "1.25"
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - dupl
+    - musttag
+    - unconvert
+  settings:
+    dupl:
+      threshold: 100
+    errcheck:
+      check-blank: true
+    staticcheck:
+      checks:
+        - all
+        - -SA1019
+  exclusions:
+    generated: lax
+    paths:
+      - .*_test\.go
+      - backend/internal/db/sqlc
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - .*_test\.go
+      - backend/internal/db/sqlc
+      - third_party$
+      - builtin$
+      - examples$

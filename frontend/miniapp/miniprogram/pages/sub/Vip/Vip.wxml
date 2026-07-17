@@ -1,0 +1,125 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar title="{{_i18n['vip.title'] || ''}}" back="{{true}}">
+  </navigation-bar>
+  <scroll-view
+    class="scrollarea"
+    scroll-y
+    type="list"
+    enhanced
+    scroll-anchoring
+  >
+    <view class="scrollarea-main">
+      <view class="vip-view">
+        <view class="title">
+          <text>{{_i18n['brand.name']}}</text>
+          <view>{{_i18n['vip.pro']}}</view>
+          <text>{{_i18n['vip.membership']}}</text>
+          <text wx:if="{{vipInfo.isVip > 0}}" class="validity">{{_i18n['vip.validityLabel']}}{{vipInfo.vipExpireTime}}</text>
+        </view>
+        <text class="sub-tit">{{_i18n['vip.subTitle']}}</text>
+      </view>
+    <view class="vip-info-view">
+      <text class="title">{{_i18n['vip.featureTitle']}}</text>
+      <view class="item">
+        <image src="../../../image/vip_icon_1.png" lazy-load />
+        <view>
+          <text class="tit">{{_i18n['vip.featureAi']}}</text>
+          <text class="sub-tit">{{_i18n['vip.featureAiTip']}}</text>
+        </view>
+      </view>
+      <view class="item">
+        <image src="../../../image/vip_icon_2.png" lazy-load />
+        <view>
+          <text class="tit">{{_i18n['vip.featureStorage']}}</text>
+          <text class="sub-tit">{{_i18n['vip.featureStorageTip']}}</text>
+        </view>
+      </view>
+      <view class="item">
+        <image src="../../../image/vip_icon_3.png" lazy-load />
+        <view>
+          <text class="tit">{{_i18n['vip.featureAutoRecord']}}</text>
+          <text class="sub-tit">{{_i18n['vip.featureAutoRecordTip']}}</text>
+        </view>
+      </view>
+      <view class="item">
+        <image src="../../../image/vip_icon_4.png" lazy-load />
+        <view>
+          <text class="tit">{{_i18n['vip.featureFamily']}}</text>
+          <text class="sub-tit">{{_i18n['vip.featureFamilyTip']}}</text>
+        </view>
+      </view>
+      <view class="tip">{{_i18n['vip.moreTip']}}</view>
+    </view>
+    <view class="pay-card-view" wx:if="{{paymentAvailable && vipInfo.receivedFreeVip}}">
+      <view
+        bindtap="onSelectPlan"
+        data-commodity="{{item}}"
+        wx:for="{{commodity}}"
+        wx:key="id"
+        class="pay-card {{selectedPlanId === item.id ? 'active' : ''}}"
+      >
+        <view class="card-tag" wx:if="{{item.type === 'year'}}">{{_i18n['vip.yearTag']}}</view>
+        <view class="card-main">
+          <text class="card-name">{{item.displayName}}</text>
+          <text class="price-symbol">￥</text>
+          <text class="price-num">{{item.amountFixed}}</text>
+        </view>
+      </view>
+      <text class="renewal-tip">{{_i18n['vip.singlePaymentTip']}}</text>
+    </view>
+    <view class="no-payment-tip" wx:if="{{!paymentAvailable && backendMode === 'open'}}">{{_i18n['vip.openSourceNoPayment']}}</view>
+    </view>
+  </scroll-view>
+    <view class="footer" wx:if="{{vipInfo && (paymentAvailable || (freeVipAvailable && !vipInfo.receivedFreeVip))}}">
+    <view class="btn-view">
+      <view
+        bindtap="claimFreeVip"
+        wx:if="{{!vipInfo.receivedFreeVip}}"
+        class="free {{claiming ? 'disabled' : ''}}"
+        disabled="{{claiming}}"
+      >{{claiming ? _i18n['vip.claiming'] : _i18n['vip.freeMonth']}}</view>
+      <view
+        wx:elif="{{selectedPlanId}}"
+        bindtap="confirmBuy"
+        class="submit-btn"
+      >
+        {{payNowText}}
+      </view>
+    </view>
+    <view class="info">
+      <view class="checkbox" bindtap="changeCheck">
+        <image wx:if="{{checkValue}}" src="../../../image/checked.png" />
+        <image wx:else src="../../../image/check.png" />
+      </view>
+      <text>{{_i18n['vip.agreementPrefix']}}</text>
+      <text class="link" bindtap="openUser">{{_i18n['vip.agreementName']}}</text>
+    </view>
+  </view>
+
+  
+  <ConfirmDialog
+    visible="{{showAgreementModal}}"
+    title="{{_i18n['vip.agreementModalTitle'] || ''}}"
+    content="{{_i18n['vip.agreementModalContent'] || ''}}"
+    cancelText="{{_i18n['common.cancel'] || ''}}"
+    confirmText="{{_i18n['vip.agreeAndContinue'] || ''}}"
+    bind:cancel="closeAgreementModal"
+    bind:confirm="agreeAndContinue"
+    bind:close="closeAgreementModal"
+  />
+
+  <ConfirmDialog
+    visible="{{confirmDialog.visible}}"
+    title="{{confirmDialog.title || ''}}"
+    content="{{confirmDialog.content || ''}}"
+    cancelText="{{confirmDialog.cancelText || ''}}"
+    confirmText="{{confirmDialog.confirmText || ''}}"
+    confirmType="{{confirmDialog.confirmType}}"
+    bind:cancel="onConfirmDialogCancel"
+    bind:confirm="onConfirmDialogConfirm"
+    bind:close="onConfirmDialogCancel"
+  />
+</view>
+
+

@@ -1,0 +1,29 @@
+
+<view class="{{transition ? 'Drawer transition' : 'Drawer'}}" bindtap="handMask">
+  <view
+    class="main {{noScroll ? 'main--no-scroll' : ''}}"
+    catchtap="handMain"
+    style="{{mainStyle}}"
+  >
+    <view class="handle" catchtouchmove="handletouchmove">
+      <image class="grabber-icon" src="../../image/icon_grabber.png" />
+    </view>
+    <scroll-view
+      wx:if="{{!noScroll}}"
+      class="scrollarea"
+      scroll-y
+      type="list"
+      scroll-top="{{scrollTop}}"
+      scroll-into-view="{{scrollIntoView}}"
+      bindscroll="onScroll"
+    >
+      <view class="scrollarea-main">
+        <slot></slot>
+      </view>
+    </scroll-view>
+    <view wx:if="{{noScroll}}" class="drawer-content">
+      <slot></slot>
+    </view>
+  </view>
+</view>
+

@@ -1,0 +1,63 @@
+<Drawer bind:handMask="hidden" id="MemoryEditDrawer">
+  <view class="drawer-edit">
+    <view class="drawer-title-row">
+      <text class="drawer-title">{{_i18n['memoryEdit.title']}}</text>
+      <view class="config-btn" bindtap="goMemoryConfig">{{_i18n['memoryEdit.goConfig']}}<image class="config-btn-arrow" src="../../image/icon_arrow_right_white.png" /></view>
+    </view>
+    <view class="field-input">
+      <view class="field-input-wrapper">
+        <input
+          class="field-input-field"
+          value="{{form.title}}"
+          bindinput="onTitleInput"
+          maxlength="50"
+        />
+        <text wx:if="{{!form.title}}" class="field-input-placeholder">{{_i18n['memoryEdit.apiHint']}}</text>
+      </view>
+    </view>
+    <text class="drawer-title">{{_i18n['memoryEdit.time']}}</text>
+    <view class="field-input date-input">
+      <view class="date" bindtap="openCalendar">
+        <view class="picker-content">
+          <text>{{formatDate}}</text>
+        </view>
+      </view>
+      <view class="date-line"></view>
+      <view class="time" bindtap="openTimePicker">
+        <view class="picker-content">
+          <text>{{formatTime}}</text>
+        </view>
+      </view>
+      <image class="field-input-icon" src="../../image/icon_calendar.png" />
+    </view>
+    <CalendarPicker
+      visible="{{calendarVisible}}"
+      value="{{form.date}}"
+      bind:confirm="onCalendarConfirm"
+      bind:close="onCalendarClose"
+    />
+    <TimePicker
+      visible="{{timePickerVisible}}"
+      value="{{form.time}}"
+      bind:confirm="onTimeConfirm"
+      bind:close="onTimeClose"
+    />
+    <text class="drawer-title">{{_i18n['memoryEdit.content']}}</text>
+    <view class="field-textarea">
+      <view class="field-textarea-wrapper">
+        <textarea
+          class="textarea-field"
+          value="{{form.content}}"
+          bindinput="onContentInput"
+          maxlength="{{10000}}"
+          auto-height
+        />
+        <text wx:if="{{!form.content}}" class="field-textarea-placeholder">{{_i18n['memoryEdit.contentPlaceholder']}}</text>
+      </view>
+    </view>
+    <view class="drawer-footer">
+      <view class="tool-btn save-btn" catchtap="submit">{{_i18n['memoryEdit.save']}}</view>
+      <view class="tool-btn cancel-btn" catchtap="cancel">{{_i18n['memoryEdit.cancel']}}</view>
+    </view>
+  </view>
+</Drawer>

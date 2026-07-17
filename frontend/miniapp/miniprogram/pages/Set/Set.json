@@ -1,0 +1,8 @@
+{
+  "usingComponents": {
+    "navigation-bar": "/components/navigation-bar/navigation-bar",
+    "Cell": "/components/Cell/Cell",
+    "Drawer": "/components/Drawer/Drawer"
+  },
+  "renderer": "webview"
+}

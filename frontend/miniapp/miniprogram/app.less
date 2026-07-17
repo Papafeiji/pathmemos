@@ -1,0 +1,66 @@
+/**app.wxss**/
+@import "./iconfont/iconfont.less";
+
+page {
+  --ppfj-bg: #f7f7f8;
+  --ppfj-card-bg: #ffffff;
+  --ppfj-text: #23262f;
+  --ppfj-text-secondary: #777e90;
+  --ppfj-text-tertiary: #939393;
+  --ppfj-border: #e6e8ec;
+  --ppfj-input-bg: #faf8f5;
+  --ppfj-mask: rgba(0, 0, 0, 0.33);
+  background-color: var(--ppfj-bg);
+}
+
+page[data-theme="dark"],
+.BasePage[data-theme="dark"] {
+  --ppfj-bg: #0f0f10;
+  --ppfj-card-bg: #1a1a1c;
+  --ppfj-text: #f0f0f2;
+  --ppfj-text-secondary: #989aa2;
+  --ppfj-text-tertiary: #6c6c70;
+  --ppfj-border: #2d2d30;
+  --ppfj-input-bg: #141415;
+  --ppfj-mask: rgba(0, 0, 0, 0.55);
+  background-color: var(--ppfj-bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  page,
+  .BasePage {
+    --ppfj-bg: #0f0f10;
+    --ppfj-card-bg: #1a1a1c;
+    --ppfj-text: #f0f0f2;
+    --ppfj-text-secondary: #989aa2;
+    --ppfj-text-tertiary: #6c6c70;
+    --ppfj-border: #2d2d30;
+    --ppfj-input-bg: #141415;
+    --ppfj-mask: rgba(0, 0, 0, 0.55);
+    background-color: var(--ppfj-bg);
+  }
+
+  page[data-theme="light"],
+  .BasePage[data-theme="light"] {
+    --ppfj-bg: #f7f7f8;
+    --ppfj-card-bg: #ffffff;
+    --ppfj-text: #23262f;
+    --ppfj-text-secondary: #777e90;
+    --ppfj-text-tertiary: #939393;
+    --ppfj-border: #e6e8ec;
+    --ppfj-input-bg: #faf8f5;
+    --ppfj-mask: rgba(0, 0, 0, 0.33);
+  }
+}
+
+/* 全局 border-box 重置：page 根节点无法被子节点继承 box-sizing，必须作用于 view 节点才能保持原有布局 */
+view {
+  box-sizing: border-box;
+}
+
+.transition {
+  .noteEdits-btns,
+  .bottom-input-view {
+    opacity: 0;
+  }
+}

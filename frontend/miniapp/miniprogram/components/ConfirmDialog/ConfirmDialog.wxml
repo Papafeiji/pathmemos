@@ -1,0 +1,25 @@
+<view class="confirm-dialog" wx:if="{{visible}}">
+  <view class="modal-mask" bindtap="onMaskTap"></view>
+  <view class="modal-content">
+    <view class="modal-warn-icon" wx:if="{{confirmType === 'danger'}}">
+      <text class="modal-warn-icon-text">!</text>
+    </view>
+    <view class="modal-title {{confirmType === 'danger' ? 'modal-title--danger' : ''}}" wx:if="{{title}}">{{title}}</view>
+    <view class="modal-body"><text selectable>{{content}}</text></view>
+    <view class="modal-input-area" wx:if="{{showInput}}">
+      <view class="modal-input-display {{confirmType === 'danger' ? 'modal-input-display--danger' : ''}}" wx:if="{{showInput && confirmType !== 'danger'}}">
+        <text class="modal-input-display-text" selectable>{{inputDisplayValue}}</text>
+      </view>
+      <input
+        class="modal-input"
+        value="{{inputValue}}"
+        placeholder="{{inputPlaceholder}}"
+        bindinput="onInput"
+      />
+    </view>
+    <view class="modal-footer">
+      <view class="btn-confirm {{cancelText ? '' : 'btn-confirm--full'}} {{confirmType === 'danger' ? 'btn-confirm--danger' : ''}} {{confirmDisabled ? 'btn-confirm--disabled' : ''}}" bindtap="onConfirm">{{confirmText || _i18n['common.confirm']}}</view>
+      <view wx:if="{{cancelText}}" class="btn-cancel" bindtap="onCancel">{{cancelText}}</view>
+    </view>
+  </view>
+</view>

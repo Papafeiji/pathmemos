@@ -1,0 +1,107 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar
+    title="{{_i18n['mcp.title'] || ''}}"
+    back
+  ></navigation-bar>
+
+  <scroll-view
+    class="scrollarea"
+    scroll-y
+    type="list"
+    enhanced
+    scroll-anchoring
+  >
+    <view class="scrollarea-main">
+      <view class="tips">
+        <view class="tips-title">{{_i18n['mcp.aiMemoryArchive']}}</view>
+        <view class="tips-desc">{{_i18n['mcp.desc']}}</view>
+      </view>
+
+      <view wx:if="{{!apiKey && !mcpConfigText && !loading}}" class="empty-state">
+        <view class="empty-text">{{_i18n['mcp.noKey']}}</view>
+        <view class="empty-sub">{{_i18n['mcp.noKeySub']}}</view>
+        <view class="generate-btn" bindtap="generateKey">{{_i18n['mcp.generateKey']}}</view>
+      </view>
+
+      <view wx:if="{{apiKey || mcpConfigText}}" class="info-card">
+        <view class="card-header">
+          <view class="card-title">{{_i18n['mcp.apiKeyTitle']}}</view>
+          <view class="refresh-icon" bindtap="refreshKey">
+            <text class="refresh-symbol">⟳</text>
+          </view>
+        </view>
+
+        <view class="key-value" bindtap="onKeyTap">
+          <text selectable>{{apiKey}}</text>
+        </view>
+
+        <view class="tab-bar">
+          <view class="tab-item {{activeTab === 'input' ? 'active' : ''}}" data-tab="input" bindtap="switchTab">{{_i18n['mcp.inputMemory']}}</view>
+          <view class="tab-item {{activeTab === 'query' ? 'active' : ''}}" data-tab="query" bindtap="switchTab">{{_i18n['mcp.queryMemory']}}</view>
+        </view>
+
+        <view class="tab-content" wx:if="{{activeTab === 'input'}}">
+          <view class="section-title">{{_i18n['mcp.apiConfig']}}</view>
+          <view class="tip-code" selectable>
+POST {{memoryUrl}}
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "record_time": "2024-12-25T12:00:00Z",
+  "title": "{{_i18n['mcp.inputExampleTitle']}}",
+  "content": "{{_i18n['mcp.inputExampleContent']}}"
+}
+          </view>
+          <view class="tip-list">
+            <view class="tip-item">{{_i18n['mcp.tipRecordTime']}}</view>
+            <view class="tip-item">{{_i18n['mcp.tipTitle']}}</view>
+            <view class="tip-item">{{_i18n['mcp.tipContent']}}</view>
+          </view>
+        </view>
+
+        <view class="tab-content" wx:if="{{activeTab === 'query'}}">
+          <view class="section-title">{{_i18n['mcp.apiConfig']}}</view>
+          <view class="tip-code" selectable>
+GET {{apiUrl}}?start_date=2024-01-01&end_date=2024-12-31
+Authorization: Bearer {{apiKey}}
+          </view>
+          <view class="tip-list">
+            <view class="tip-item">{{_i18n['mcp.queryDefaultRange']}}</view>
+            <view class="tip-item">{{_i18n['mcp.queryDateRange']}}</view>
+            <view class="tip-item">{{_i18n['mcp.queryLimit']}}</view>
+            <view class="tip-item">{{_i18n['mcp.queryResultOrder']}}</view>
+          </view>
+        </view>
+
+        <view class="mcp-section">
+          <view class="section-title">{{_i18n['mcp.mcpConfig']}}</view>
+          <view class="tip-code mcp-config-code">
+            <text selectable>{{mcpConfigText}}</text>
+          </view>
+          <view class="tip-list">
+            <view class="tip-item">{{_i18n['mcp.mcpSupport']}}</view>
+            <view class="tip-item" wx:if="{{!apiKey}}">{{_i18n['mcp.mcpRegenerateTip']}}</view>
+            <block wx:if="{{authUrl}}">
+              <view class="tip-item">{{_i18n['mcp.bindPageTip']}}</view>
+              <view class="tip-code" selectable>{{authUrl}}</view>
+            </block>
+          </view>
+        </view>
+      </view>
+    </view>
+  </scroll-view>
+
+  <ConfirmDialog
+    visible="{{confirmDialog.visible}}"
+    title="{{confirmDialog.title || ''}}"
+    content="{{confirmDialog.content || ''}}"
+    cancelText="{{confirmDialog.cancelText || ''}}"
+    confirmText="{{confirmDialog.confirmText || ''}}"
+    confirmType="{{confirmDialog.confirmType}}"
+    bind:cancel="onConfirmDialogCancel"
+    bind:confirm="onConfirmDialogConfirm"
+    bind:close="onConfirmDialogCancel"
+  />
+</view>

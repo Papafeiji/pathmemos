@@ -1,0 +1,10 @@
+
+<view class="Cell" catchtap="onTap">
+  <view class="Text">
+    <slot></slot>
+  </view>
+  <slot name="suffix"></slot>
+  <text class="suffix" wx:if="{{suffix}}">{{suffix}}</text>
+  <text wx:if="{{showArrow}}" class="iconfont ppfjhoutui"></text>
+</view>
+

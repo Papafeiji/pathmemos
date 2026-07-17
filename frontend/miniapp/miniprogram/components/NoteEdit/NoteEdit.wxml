@@ -1,0 +1,96 @@
+
+<Drawer bind:handMask="hidden" id="NoteEditDrawer">
+  <view class="drawer-edit">
+    <view class="drawer-title mt-0">
+      <text>{{_i18n['noteEdit.location']}}</text>
+      <AutoBtn wx:if="{{!hiddenAutoRecord}}" class="autoBtn" openAutoRecorded="{{openAutoRecord}}" bind:change="onAutoRecordChange" />
+    </view>
+    <view class="field-input">
+      <input class="field-input-field" value="{{form.diaryAddress}}" bindtap="chooseLocation" disabled />
+
+      <image class="field-input-icon" src="../../image/icon_address.png" />
+    </view>
+    <view wx:if="{{poiOptions.length > 0}}" class="poi-section">
+      <view class="poi-options">
+        <view
+          wx:for="{{poiOptions}}"
+          wx:key="id"
+          class="poi-option {{form.diaryAddress === item.title ? 'poi-option--active' : ''}}"
+          data-index="{{index}}"
+          bindtap="selectPOI"
+          hover-class="poi-option--press"
+          hover-stay-time="100"
+        >
+          <text class="poi-title">{{item.title}}</text>
+        </view>
+        <view
+          class="poi-option"
+          bindtap="goCommonAddresses"
+          hover-class="poi-option--press"
+          hover-stay-time="100"
+        >
+          <text class="poi-title">{{_i18n['noteEdit.commonAddresses']}}</text>
+        </view>
+      </view>
+    </view>
+    <text class="drawer-title">{{_i18n['noteEdit.time']}}</text>
+    <view class="field-input date-input">
+      <view class="date" bindtap="openCalendar">
+        <view class="picker-content">
+          <text>{{formatDate}}</text>
+        </view>
+      </view>
+      <view class="date-line"></view>
+      <view class="time" bindtap="openTimePicker">
+        <view class="picker-content">
+          <text>{{formatTime}}</text>
+        </view>
+      </view>
+      <image class="field-input-icon" src="../../image/icon_calendar.png" />
+    </view>
+    <CalendarPicker
+      visible="{{calendarVisible}}"
+      value="{{form.date}}"
+      bind:confirm="onCalendarConfirm"
+      bind:close="onCalendarClose"
+    />
+    <TimePicker
+      visible="{{timePickerVisible}}"
+      value="{{form.time}}"
+      bind:confirm="onTimeConfirm"
+      bind:close="onTimeClose"
+      bind:editOpen="onTimeEditOpen"
+      bind:editClose="onTimeEditClose"
+    />
+    <text class="drawer-title">{{_i18n['noteEdit.diary']}}</text>
+    <PTextarea
+      id="NoteEditRecord"
+      value="{{form.recordText}}"
+      imageList="{{imgList}}"
+      maxlength="{{140}}"
+      disabled="{{calendarVisible || timePickerVisible || timeEditVisible}}"
+      bind:input="onRecordTextInput"
+      bind:handleImage="selectImage"
+      bind:handleDel="delImage"
+    />
+    <view class="drawer-footer">
+      <view class="tool-btn save-btn" catchtap="submit">{{_i18n['noteEdit.save']}}</view>
+      <view class="tool-btn cancel-btn" catchtap="cancel">{{_i18n['noteEdit.cancel']}}</view>
+    </view>
+  </view>
+  </Drawer>
+
+  <ConfirmDialog
+    visible="{{confirmDialog.visible}}"
+    title="{{confirmDialog.title || ''}}"
+    content="{{confirmDialog.content || ''}}"
+    cancelText="{{confirmDialog.cancelText || ''}}"
+    confirmText="{{confirmDialog.confirmText || ''}}"
+    confirmType="{{confirmDialog.confirmType}}"
+    bind:cancel="onConfirmDialogCancel"
+    bind:confirm="onConfirmDialogConfirm"
+    bind:close="onConfirmDialogCancel"
+  />
+
+
+

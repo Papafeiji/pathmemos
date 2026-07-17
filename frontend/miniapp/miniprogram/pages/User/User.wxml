@@ -1,0 +1,71 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar
+    title="{{_i18n['profile.title'] || ''}}"
+    back="{{true}}"
+    fallback-url="/pages/index/index"
+  ></navigation-bar>
+  <scroll-view class="scrollarea" scroll-y type="list" enhanced scroll-anchoring>
+    <view class="scrollarea-main">
+      <view class="main">
+    <image
+      class="head"
+      src="../../image/user_cover{{ _locale === 'en' ? '_en' : '' }}.png"
+      mode="widthFix"
+      lazy-load
+      bindtap="toGuidePage"
+    />
+    <view class="vip-view" bindtap="gotoVip">
+      <view class="content">
+        <view>{{_i18n['brand.name']}}</view>
+        <view class="pro">{{_i18n['profile.pro']}}</view>
+        <view class="validity" wx:if="{{vipInfo.isVip > 0}}">{{_i18n['profile.validityLabel']}} {{vipInfo.vipExpireTime}}</view>
+        <view wx:else class="btn">
+          {{vipInfo.receivedFreeVip > 0 ? _i18n['profile.buyVip'] : _i18n['profile.freeTrial']}}
+          <image src="../../image/icon_arrow_right.png" />
+        </view>
+      </view>
+      <image src="../../image/vip_bg.png" lazy-load />
+    </view>
+    <Cell
+      class="cell"
+      bindtap="toFamily"
+      showArrow
+    >{{_i18n['profile.myFamily']}}
+    </Cell>
+    <Cell
+      class="cell"
+      bindtap="toMcp"
+      showArrow
+    >{{_i18n['profile.myMemory']}}
+    </Cell>
+    <Cell
+      wx:if="{{!isPrivateBackend}}"
+      class="cell"
+      bindtap="toInvite"
+      showArrow
+    >{{_i18n['profile.myInvite']}}
+    </Cell>
+    <Cell
+      class="cell"
+      bindtap="toSet"
+      showArrow
+    >{{_i18n['profile.settings']}}
+    </Cell>
+    <Cell
+      class="cell"
+      bindtap="goBackendConfig"
+      showArrow
+    >{{_i18n['set.backendConfig']}}
+    </Cell>
+    <Cell
+      class="cell"
+      bindtap="toAbout"
+      showArrow
+    >{{_i18n['profile.about']}}
+    </Cell>
+  </view>
+    </view>
+  </scroll-view>
+</view>
+

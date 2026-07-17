@@ -1,0 +1,19 @@
+<view class="AutoBtn {{mode === 'icon' ? 'icon-mode' : ''}}" bindtap="change">
+  <block wx:if="{{mode === 'icon'}}">
+    <image
+      class="auto-btn-icon-img"
+      src="{{openAutoRecorded ? '../../image/icon_auto_record_on.png' : '../../image/icon_auto_record_off.png'}}"
+    />
+  </block>
+  <block wx:else>
+    <view>{{openAutoRecorded ? _i18n['autoBtn.recording'] : _i18n['autoBtn.autoRecord']}}</view>
+    <image class="auto-btn-icon" wx:if="{{!openAutoRecorded}}" src="../../image/icon_arrow_right_white.png" />
+  </block>
+</view>
+
+<SubscribePrompt
+  wx:if="{{!disableSubscribe}}"
+  visible="{{showSubscribePrompt}}"
+  bind:confirm="onSubscribeConfirm"
+  bind:cancel="onSubscribeCancel"
+/>

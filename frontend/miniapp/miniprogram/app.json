@@ -1,0 +1,55 @@
+{
+  "pages": [
+    "pages/index/index",
+    "pages/NoteDetail/NoteDetail",
+    "pages/User/User",
+    "pages/Set/Set",
+    "pages/CommonAddresses/CommonAddresses",
+    "pages/Guide/Guide",
+    "pages/Invite/Invite",
+    "pages/Family/Family"
+  ],
+  "subpackages": [
+    {
+      "root": "pages/sub",
+      "pages": [
+        "About/About",
+        "Vip/Vip",
+        "WebPage/WebPage",
+        "UsageGuide/UsageGuide",
+        "Mcp/Mcp",
+        "BackendConfig/BackendConfig"
+      ]
+    }
+  ],
+  "requiredPrivateInfos": [
+    "getLocation",
+    "onLocationChange",
+    "chooseLocation",
+    "startLocationUpdate",
+    "startLocationUpdateBackground"
+  ],
+  "requiredBackgroundModes": ["location"],
+  "permission": {
+    "scope.userLocation": {
+      "desc": "用于记录日记位置"
+    },
+    "scope.userLocationBackground": {
+      "desc": "用于后台持续记录行程轨迹"
+    }
+  },
+  "window": {
+    "navigationBarBackgroundColor": "@navBgColor",
+    "navigationBarTextStyle": "@navTxtStyle",
+    "backgroundColor": "@pageBgColor",
+    "backgroundTextStyle": "dark",
+    "navigationStyle": "custom",
+    "initialRenderingCache": "dynamic"
+  },
+  "darkmode": true,
+  "themeLocation": "theme.json",
+  "style": "v2",
+  "componentFramework": "exparser",
+  "sitemapLocation": "sitemap.json",
+  "lazyCodeLoading": "requiredComponents"
+}

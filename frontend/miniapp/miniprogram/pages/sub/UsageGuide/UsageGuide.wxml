@@ -1,0 +1,38 @@
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar title="{{_i18n['usageGuide.title'] || ''}}" back></navigation-bar>
+  <scroll-view class="scrollarea" scroll-y type="list" enhanced scroll-anchoring>
+    <view class="scrollarea-main">
+      <image class="head" src="../../../image/usageGuide_bg.png" mode="widthFix" lazy-load />
+      <view class="main">
+    <view class="ug-cell" bindtap="openTutorial0">
+      <text>{{_i18n['usageGuide.pinToTop']}}</text>
+      <text class="iconfont ppfjhoutui"></text>
+    </view>
+    <view class="ug-cell" bindtap="openTutorial1">
+      <text>{{_i18n['usageGuide.familyShare']}}</text>
+      <text class="iconfont ppfjhoutui"></text>
+    </view>
+    <view class="ug-cell" bindtap="openTutorial2">
+      <text>{{_i18n['usageGuide.autoRecord']}}</text>
+      <text class="iconfont ppfjhoutui"></text>
+    </view>
+    <view class="ug-cell" bindtap="openTutorial3">
+      <text>{{_i18n['usageGuide.shareTrip']}}</text>
+      <text class="iconfont ppfjhoutui"></text>
+    </view>
+    <view class="ug-cell" bindtap="openTutorial5">
+      <text>{{_i18n['usageGuide.collectWorkMemory'] || ''}}</text>
+      <text class="iconfont ppfjhoutui"></text>
+    </view>
+    <view class="ug-cell" bindtap="openTutorial6">
+      <text>{{_i18n['usageGuide.commonPlaces'] || ''}}</text>
+      <text class="iconfont ppfjhoutui"></text>
+    </view>
+    <view class="ug-cell" bindtap="openTutorial7">
+      <text>{{_i18n['usageGuide.inviteGiftVip'] || ''}}</text>
+      <text class="iconfont ppfjhoutui"></text>
+    </view>
+    </view>
+    </view>
+  </scroll-view>
+</view>

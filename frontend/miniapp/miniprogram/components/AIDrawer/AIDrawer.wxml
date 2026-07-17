@@ -1,0 +1,113 @@
+
+<view wx:if="{{connecting}}" class="bottom-input-view" style="padding-bottom:{{bottom ? '20px' : bottomSafeHeight}};bottom: {{bottom}}px;">
+  <view class="input-view">
+    <input
+      class="ai-input"
+      bindfocus="bindfocus"
+      bindblur="bindblur"
+      adjust-position="{{false}}"
+      hold-keyboard
+      bindinput="bindinput"
+      bindconfirm="submit"
+      confirm-type="send"
+      value="{{inputValue}}"
+      placeholder="{{_i18n['aiDrawer.placeholder']}}"
+    />
+    <view class="submit-btn" bindtap="submit">
+      <view class="submit-icon"></view>
+    </view>
+  </view>
+  <view class="tip">{{_i18n['aiDrawer.aiGenerated']}}</view>
+</view>
+
+<Drawer
+  bind:handMask="hidden"
+  id="AIDrawer"
+  scrollIntoId="{{scrollIntoId}}"
+>
+  <view wx:if="{{connecting}}">
+    <view class="chat-list" id="chat-list">
+      <view
+        class="message-item {{item.type}}"
+        wx:for="{{list}}"
+        wx:key="_msgId"
+        id="msg-{{index}}"
+      >
+        <image
+          mode="aspectFill"
+          class="avatar"
+          src="{{item.type == 'USER' ? userAvatar : '../../image/logo.png'}}"
+        />
+        <view class="bubble-wrapper">
+          <view class="bubble">
+            <text wx:if="{{item.type == 'USER'}}" class="bubble-text">{{item.txt}}</text>
+            <block wx:else>
+              <text wx:if="{{!item.html}}" class="bubble-text">{{item.txt}}</text>
+              <rich-text wx:else class="rich-text" nodes="{{item.html}}"></rich-text>
+              <view wx:if="{{item.error}}" class="retry-btn" bindtap="retryLast">{{_i18n['aiDrawer.retry']}}</view>
+            </block>
+          </view>
+          <view class="date-links" wx:if="{{item.diaryCard && item.diaryCard.length}}">
+            <view
+              class="date-link"
+              wx:for="{{item.diaryCard}}"
+              wx:for-item="diaryCard"
+              wx:key="id"
+              data-info="{{diaryCard}}"
+              bindtap="gotoDetail"
+            >
+              <text class="link-text">{{diaryCard.dateNameFormat}}</text>
+              <view class="link-arrow">›</view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view class="list-bottom-placeholder" id="msg-bottom"></view>
+    </view>
+  </view>
+
+  <view wx:else class="ai-landing">
+    <view class="title">
+      <text>{{_i18n['aiDrawer.askTitle']}}</text>
+      <view class="family">{{_i18n['aiDrawer.familyDiary']}}</view>
+    </view>
+    <view class="input-view">
+      <input
+        class="ai-input"
+        adjust-position="{{false}}"
+        bindinput="bindinput"
+        bindconfirm="submit"
+        confirm-type="send"
+        value="{{inputValue}}"
+        placeholder="{{_i18n['aiDrawer.placeholder']}}"
+      />
+      <view class="submit-btn" bindtap="submit">
+        <view class="submit-icon"></view>
+      </view>
+    </view>
+    <view class="mock-list">
+      <view class="mock-title">{{_i18n['aiDrawer.examples']}}</view>
+      <view
+        class="item"
+        catchtap="submit"
+        data-example="{{item}}"
+        wx:for="{{exampleList}}"
+        wx:key="index"
+      >
+        <image class="mock-logo" src="../../image/logo.png" />
+        <text class="mock-txt">{{item}}</text>
+        <view class="mock-arrow">›</view>
+      </view>
+    </view>
+  </view>
+</Drawer>
+
+<ConfirmDialog
+  visible="{{showQuotaDialog}}"
+  title="{{_i18n['aiDrawer.quotaTitle'] || ''}}"
+  content="{{_i18n['aiDrawer.quotaContent'] || ''}}"
+  confirmText="{{_i18n['aiDrawer.confirm'] || ''}}"
+  bind:confirm="onQuotaDialogConfirm"
+  bind:close="onQuotaDialogClose"
+/>

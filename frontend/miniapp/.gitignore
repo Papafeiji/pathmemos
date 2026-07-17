@@ -1,0 +1,20 @@
+# Node
+node_modules/
+miniprogram/miniprogram_npm/
+
+# 敏感文件
+private.key
+packagekey/
+SECRETS.md
+.env
+.env.local
+
+# 构建产物
+*.js.map
+
+# 日志
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

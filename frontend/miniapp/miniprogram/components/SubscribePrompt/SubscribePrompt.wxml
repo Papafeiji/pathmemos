@@ -1,0 +1,10 @@
+<ConfirmDialog
+  visible="{{visible}}"
+  title="{{_i18n['subscribePrompt.title'] || ''}}"
+  content="{{_i18n['subscribePrompt.content'] || ''}}"
+  confirmText="{{_i18n['subscribePrompt.enable'] || ''}}"
+  cancelText="{{_i18n['subscribePrompt.cancel'] || ''}}"
+  bind:confirm="onConfirm"
+  bind:cancel="onCancel"
+  bind:close="onCancel"
+/>

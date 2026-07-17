@@ -1,0 +1,149 @@
+
+
+const SESSION_ID_KEY = 'papafeiji:sessionId';
+
+export const getSessionId = () => {
+  try {
+    return wx.getStorageSync(SESSION_ID_KEY);
+  } catch {
+    return '';
+  }
+};
+
+export const setSessionId = (sessionId: string) => {
+  try { wx.setStorageSync(SESSION_ID_KEY, sessionId); } catch {}
+};
+
+export const clearSessionId = () => {
+  try { wx.removeStorageSync(SESSION_ID_KEY); } catch {}
+};
+
+export const clearUserData = () => {
+  try { wx.removeStorageSync(SESSION_ID_KEY); } catch {}
+  try { wx.removeStorageSync('papafeiji:baseInfo'); } catch {}
+  try { wx.removeStorageSync('papafeiji:vipInfo'); } catch {}
+  try { wx.removeStorageSync('papafeiji:needShowXPa'); } catch {}
+  try { wx.removeStorageSync('papafeiji:autoRecordEnabled'); } catch {}
+  try { wx.removeStorageSync('papafeiji:autoRecordStayPoints'); } catch {}
+  try { wx.removeStorageSync('memory_longpress_guide_shown'); } catch {}
+  clearPendingLinkId();
+  clearPendingInviter();
+};
+
+export const setBaseInfo = (baseInfo: any) => {
+  const existing = getBaseInfo();
+  const merged = { ...existing, ...baseInfo };
+  for (const key of Object.keys(baseInfo)) {
+    if (baseInfo[key] && typeof baseInfo[key] === 'object' && !Array.isArray(baseInfo[key]) && existing && existing[key] && typeof existing[key] === 'object') {
+      merged[key] = { ...existing[key], ...baseInfo[key] };
+    }
+  }
+  try { wx.setStorageSync('papafeiji:baseInfo', JSON.stringify(merged)); } catch {}
+};
+
+export const getBaseInfo = () => {
+  let baseInfo = '';
+  try {
+    baseInfo = wx.getStorageSync('papafeiji:baseInfo');
+  } catch {
+    return null;
+  }
+  if (!baseInfo) return null;
+  try {
+    return JSON.parse(baseInfo);
+  } catch {
+    try { wx.removeStorageSync('papafeiji:baseInfo'); } catch {}
+    return null;
+  }
+};
+
+export const getAvatar = () => {
+  const { avatar } = getBaseInfo() || {};
+  return avatar;
+};
+
+export const needShowXPa = () => {
+  try {
+    return wx.getStorageSync('papafeiji:needShowXPa');
+  } catch {
+    return false;
+  }
+};
+
+export const setNeedShowXPa = (needShowXPa: boolean) => {
+  try { wx.setStorageSync('papafeiji:needShowXPa', needShowXPa); } catch {}
+};
+
+export const STORAGE_KEY_MODE = 'backend_mode';
+export const STORAGE_KEY_URL = 'private_backend_url';
+export const STORAGE_KEY_API_KEY = 'private_backend_api_key';
+
+export const getBackendMode = (): string => {
+  try {
+    return wx.getStorageSync(STORAGE_KEY_MODE) || 'saas';
+  } catch {
+    return 'saas';
+  }
+};
+
+export const getPrivateBackendUrl = (): string => {
+  try {
+    return wx.getStorageSync(STORAGE_KEY_URL) || '';
+  } catch {
+    return '';
+  }
+};
+
+export const getPrivateBackendApiKey = (): string => {
+  try {
+    return wx.getStorageSync(STORAGE_KEY_API_KEY) || '';
+  } catch {
+    return '';
+  }
+};
+
+const PENDING_LINK_KEY = 'pendingLinkId';
+
+
+export const getPendingLinkId = (): string | null => {
+  try {
+    const raw = wx.getStorageSync(PENDING_LINK_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed.value || null;
+  } catch {
+    try { wx.removeStorageSync(PENDING_LINK_KEY); } catch {}
+    return null;
+  }
+};
+
+export const setPendingLinkId = (linkId: string) => {
+  try { wx.setStorageSync(PENDING_LINK_KEY, JSON.stringify({ value: linkId, ts: Date.now() })); } catch {}
+};
+
+export const clearPendingLinkId = () => {
+  try { wx.removeStorageSync(PENDING_LINK_KEY); } catch {}
+};
+
+const PENDING_INVITER_KEY = 'pendingInviter';
+
+
+export const getPendingInviter = (): string | null => {
+  try {
+    const raw = wx.getStorageSync(PENDING_INVITER_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed.value || null;
+  } catch {
+    try { wx.removeStorageSync(PENDING_INVITER_KEY); } catch {}
+    return null;
+  }
+};
+
+export const setPendingInviter = (inviter: string) => {
+  try { wx.setStorageSync(PENDING_INVITER_KEY, JSON.stringify({ value: inviter, ts: Date.now() })); } catch {}
+};
+
+export const clearPendingInviter = () => {
+  try { wx.removeStorageSync(PENDING_INVITER_KEY); } catch {}
+};

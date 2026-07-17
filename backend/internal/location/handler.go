@@ -1,0 +1,125 @@
+package location
+
+import (
+	"context"
+	"fmt"
+
+	"log/slog"
+	"math"
+	"net/http"
+	"strconv"
+	"time"
+
+	"papafeiji/backend/internal/config"
+	"papafeiji/backend/internal/middleware"
+	"papafeiji/backend/pkg/errors"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
+)
+
+const (
+	maxReversePerUserPerDay = 200
+	reverseQuotaKeyPrefix   = "location:reverse"
+	reverseQuotaTTL         = 24 * time.Hour
+)
+
+// checkReverseQuotaScript atomically increments the per-user daily counter and
+// sets its TTL on the first increment. Returns 1 if the request is within quota.
+var checkReverseQuotaScript = `
+local key = KEYS[1]
+local ttl = tonumber(ARGV[1])
+local maxCount = tonumber(ARGV[2])
+local cur = redis.call('incr', key)
+if cur == 1 then
+    redis.call('expire', key, ttl)
+end
+return cur <= maxCount and 1 or 0
+`
+
+type Handler struct {
+	router         chi.Router
+	tencentMapKeys []string
+	client         *Client
+	rdb            *redis.Client
+}
+
+func NewHandler(router chi.Router, cfg *config.Config, rdb *redis.Client) *Handler {
+	return &Handler{router: router, tencentMapKeys: cfg.TencentMapKeys, client: NewClient(cfg.TencentMapKeys), rdb: rdb}
+}
+
+func (h *Handler) Register() {
+	h.router.Get("/location/reverse", h.Reverse)
+}
+
+func (h *Handler) Reverse(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID := middleware.UserID(ctx)
+
+	latStr := r.URL.Query().Get("latitude")
+	lonStr := r.URL.Query().Get("longitude")
+	lat, err := strconv.ParseFloat(latStr, 64)
+	if err != nil {
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid latitude")
+		return
+	}
+	lon, err := strconv.ParseFloat(lonStr, 64)
+	if err != nil {
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid longitude")
+		return
+	}
+	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid coordinates")
+		return
+	}
+
+	if !h.checkReverseQuota(ctx, userID) {
+		middleware.JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "daily reverse geocode quota exceeded")
+		return
+	}
+
+	roundedLat := roundHalfUp(lat, 4)
+	roundedLon := roundHalfUp(lon, 4)
+
+	withPois := r.URL.Query().Get("pois") != "0"
+
+	res, err := h.client.Reverse(ctx, roundedLat, roundedLon, withPois)
+	if err != nil {
+		slog.ErrorContext(ctx, "reverse geocode failed", slog.Any("error", err))
+		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "reverse geocode failed")
+		return
+	}
+
+	resp := map[string]interface{}{
+		"address":       res.Address,
+		"detailAddress": res.DetailAddress,
+		"landmark":      res.Landmark,
+		"areaCode":      res.AreaCode,
+		"areaName":      res.AreaName,
+		"pois":          res.POIs,
+	}
+	middleware.JSON(w, r, http.StatusOK, resp)
+}
+
+func (h *Handler) checkReverseQuota(ctx context.Context, userID string) bool {
+	if h.rdb == nil {
+		slog.ErrorContext(ctx, "reverse geocode quota check failed: redis not available")
+		return false
+	}
+	key := fmt.Sprintf("%s:%s:%s", reverseQuotaKeyPrefix, userID, time.Now().UTC().Format("2006-01-02"))
+	allowed, err := h.rdb.Eval(ctx, checkReverseQuotaScript,
+		[]string{key},
+		int64(reverseQuotaTTL.Seconds()),
+		maxReversePerUserPerDay,
+	).Int()
+	if err != nil {
+		slog.ErrorContext(ctx, "reverse geocode quota check failed", slog.Any("error", err))
+		return false
+	}
+	return allowed == 1
+}
+
+func roundHalfUp(v float64, places int) float64 {
+	shift := math.Pow(10, float64(places))
+	return math.Round(v*shift) / shift
+}

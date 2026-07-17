@@ -1,0 +1,68 @@
+
+<view class="BasePage backend-config-page" data-theme="{{theme}}">
+  <navigation-bar
+    title="{{_i18n['backendConfig.title'] || ''}}"
+    back
+  ></navigation-bar>
+  <scroll-view class="scrollarea" scroll-y type="list" enhanced scroll-anchoring>
+    <view class="scrollarea-main">
+      <view class="tip-card">
+        <view class="tip-title">{{_i18n['backendConfig.tipTitle'] || ''}}</view>
+        <view class="tip-text">{{_i18n['backendConfig.tipText'] || ''}}</view>
+      </view>
+
+      <view class="github-card" bindtap="openHomepage">
+        <text class="github-text">{{_i18n['backendConfig.githubBannerPrefix'] || ''}}</text>
+        <view class="github-chip">
+          <text class="github-chip-text">{{_i18n['backendConfig.deployGuide'] || ''}}</text>
+        </view>
+        <text class="github-text">{{_i18n['backendConfig.githubBannerSuffix'] || ''}}</text>
+      </view>
+
+      <view class="cell-row">
+        <text class="cell-label">{{_i18n['backendConfig.enablePrivate'] || ''}}</text>
+        <switch checked="{{enabled}}" bindchange="onEnabledChange" color="#07c160" />
+      </view>
+
+      <view class="form-card" wx:if="{{enabled}}">
+        <view class="input-group">
+          <text class="input-label">{{_i18n['backendConfig.backendUrl'] || ''}}</text>
+          <input
+            class="backend-input"
+            value="{{backendUrl}}"
+            placeholder="{{_i18n['backendConfig.backendUrlPlaceholder'] || ''}}"
+            bindinput="onBackendUrlInput"
+          />
+        </view>
+        <view class="input-group">
+          <text class="input-label">{{_i18n['backendConfig.apiKey'] || ''}}</text>
+          <view class="input-row">
+            <input
+              class="backend-input"
+              type="password"
+              value="{{apiKey}}"
+              placeholder="{{_i18n['backendConfig.apiKeyPlaceholder'] || ''}}"
+              bindinput="onApiKeyInput"
+            />
+            <view class="copy-btn" wx:if="{{apiKey}}" bindtap="copyApiKey">{{_i18n['backendConfig.copyKey'] || ''}}</view>
+          </view>
+        </view>
+      </view>
+
+      <view class="warning-text" wx:if="{{currentMode === 'private'}}">
+        {{_i18n['backendConfig.currentlyOpen'] || ''}}
+      </view>
+
+      <view class="bottom-safe"></view>
+    </view>
+  </scroll-view>
+
+  <view class="tool" wx:if="{{enabled || currentMode === 'private'}}">
+    <view wx:if="{{enabled}}" class="tool-btn test {{testing ? 'disabled' : ''}}" bindtap="testConnection">
+      {{testing ? _i18n['backendConfig.testing'] : _i18n['backendConfig.testConnection']}}
+    </view>
+    <view class="tool-btn save {{saving ? 'disabled' : ''}}" bindtap="save">
+      {{saving ? _i18n['backendConfig.saving'] : _i18n['backendConfig.save']}}
+    </view>
+  </view>
+</view>

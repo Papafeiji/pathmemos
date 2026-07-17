@@ -1,0 +1,36 @@
+/* components/AutoBtn/AutoBtn.wxss */
+:host {
+  display: inline-block;
+}
+
+.AutoBtn {
+  height: 52rpx;
+  padding: 0 22rpx;
+  border-radius: 180rpx;
+  color: #ffffff;
+  font-size: 22rpx;
+  font-weight: 600;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: linear-gradient(90deg, #7D5A3D 0%, #A67C52 100%);
+  box-shadow: 0 4rpx 12rpx rgba(125, 90, 61, 0.22);
+
+  > .auto-btn-icon {
+    width: 18rpx;
+    height: 18rpx;
+    margin-left: 8rpx;
+    opacity: 0.9;
+  }
+
+  &.icon-mode {
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
+
+    > .auto-btn-icon-img {
+      width: 48rpx;
+      height: 48rpx;
+    }
+  }
+}

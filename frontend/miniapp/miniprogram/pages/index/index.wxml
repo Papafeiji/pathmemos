@@ -1,0 +1,123 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar
+    title="{{_i18n['brand.name'] || ''}}"
+    back="{{false}}"
+    homeButton
+    extClass="{{isScrollTop ? '' : 'shadow'}}"
+    bind:home="goToUser"
+  />
+
+  <scroll-view
+    class="scrollarea"
+    scroll-y="{{!showEditDrawer && !showAIDrawer}}"
+    type="list"
+    enhanced
+    scroll-anchoring
+    upper-threshold="10"
+    bindscrolltolower="handleLoadMore"
+    bindscroll="handleScroll"
+    bindscrolltoupper="handleScrollToUpper"
+  >
+    <view class="stats-card stats-style-capsule" bindtap="toggleAutoRecord">
+      <view class="stats-capsule-row">
+        <view class="capsule-item">
+          <view class="capsule-label">{{_i18n['home.recordedDays']}}</view>
+          <view class="capsule-value">
+            <text class="capsule-num">{{stats.recordDays}}</text>
+            <text class="capsule-unit">{{_i18n['home.day']}}</text>
+          </view>
+        </view>
+        <view class="capsule-dot" />
+        <view class="capsule-item">
+          <view class="capsule-label">{{_i18n['home.allRecords']}}</view>
+          <view class="capsule-value">
+            <text class="capsule-num">{{stats.totalEntries}}</text>
+            <text class="capsule-unit">{{_i18n['home.records']}}</text>
+          </view>
+        </view>
+        <view class="capsule-dot" />
+        <view class="capsule-item">
+          <view class="capsule-label">{{_i18n['home.weeklyRecords']}}</view>
+          <view class="capsule-value">
+            <text class="capsule-num">{{stats.weeklyEntries}}</text>
+            <text class="capsule-unit">{{_i18n['home.records']}}</text>
+          </view>
+        </view>
+        <view class="capsule-toggle">
+          <image class="capsule-toggle-icon" src="{{openAutoRecorded ? '../../image/location_on.svg' : '../../image/location_off.svg'}}" />
+        </view>
+      </view>
+    </view>
+
+    <view wx:if="{{list.length}}" class="scrollarea-main">
+      <NoteItem
+        wx:for="{{list}}"
+        wx:key="id"
+        info="{{item}}"
+        bind:del="reload"
+      />
+      <view class="loading-more" wx:if="{{loading}}">
+        <text>{{_i18n['home.loadingMore']}}</text>
+      </view>
+    </view>
+
+    <view wx:else class="empty">
+      <image src="../../image/empty.png" />
+      <view class="empty-text">{{_i18n['home.emptyTip']}}</view>
+    </view>
+  </scroll-view>
+
+  <view class="tool" wx:if="{{!showEditDrawer && !showAIDrawer && !showMemoryCreateDrawer}}">
+    <view class="tool-btn add" bindtap="openEditDrawer" bindlongpress="openMemoryCreateDrawer">
+      <text>{{_i18n['home.add']}}</text>
+      <image class="icon-add" src="../../image/icon_add.png" />
+    </view>
+    <view class="tool-btn ai" bindtap="openAIDrawer">
+      <text>{{_i18n['home.aiAssistant']}}</text>
+      <image class="icon-ai" src="../../image/logo.png" />
+    </view>
+  </view>
+
+  <view
+    class="longpress-guide"
+    wx:if="{{showLongpressGuide}}"
+    bindtap="onLongpressGuideClose"
+  >
+    <view class="longpress-guide-mask"></view>
+    <view class="longpress-guide-content" catchtap="onLongpressGuideContentTap">
+      <view class="longpress-guide-hint">
+        <view class="longpress-guide-title">{{_i18n['home.longpressTitle']}}</view>
+        <view class="longpress-guide-text">{{_i18n['home.shortPressTip']}}</view>
+        <view class="longpress-guide-text">{{_i18n['home.longPressTip']}}</view>
+        <view class="longpress-guide-close" bindtap="onLongpressGuideClose">{{_i18n['common.know']}}</view>
+      </view>
+    </view>
+  </view>
+
+  <NoteEdit
+    wx:if="{{showEditDrawer}}"
+    openAutoRecord="{{openAutoRecorded}}"
+    bind:hidden="closeEditDrawer"
+    bind:submit="onEntrySubmit"
+  />
+
+  <MemoryEdit
+    wx:if="{{showMemoryCreateDrawer}}"
+    info="{{memoryCreateInfo}}"
+    bind:hidden="closeMemoryCreateDrawer"
+    bind:submit="onMemoryCreateSubmit"
+  />
+
+  <AIDrawer
+    wx:if="{{showAIDrawer}}"
+    id="aiDrawer"
+    bind:hidden="closeAIDrawer"
+  />
+
+  <SubscribePrompt
+    visible="{{showSubscribePrompt}}"
+    bind:confirm="onSubscribeConfirm"
+    bind:cancel="onSubscribeCancel"
+  />
+</view>

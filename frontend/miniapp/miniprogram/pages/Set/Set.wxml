@@ -1,0 +1,127 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar
+    title="{{_i18n['set.title'] || ''}}"
+    back
+  ></navigation-bar>
+
+  <scroll-view class="scrollarea" scroll-y type="list" enhanced scroll-anchoring>
+    <view class="scrollarea-main">
+      <view class="cell-view">
+    <!-- 账号 -->
+    <view class="group-title">{{_i18n['set.groupAccount'] || ''}}</view>
+    <Cell
+      bindtap="setNickname"
+      showArrow
+      suffix="{{baseInfo.nickName || ''}}"
+    >{{_i18n['set.myName']}}
+    </Cell>
+    <view class="avatar-cell-wrap">
+      <Cell showArrow>
+        {{_i18n['set.changeAvatar']}}
+        <view class="suffix" slot="suffix">
+          <image
+            mode="aspectFill"
+            class="suffix-img"
+            src="{{userAvatar}}"
+          />
+        </view>
+      </Cell>
+      <button class="avatar-btn" open-type="chooseAvatar" bind:chooseavatar="onChooseAvatar"></button>
+    </view>
+    <view wx:if="{{!isPrivateBackend}}" class="avatar-cell-wrap">
+      <Cell showArrow suffix="{{phone || ''}}">{{phone ? _i18n['set.rebindPhone'] : _i18n['set.bindPhone']}}</Cell>
+      <button
+        class="avatar-btn"
+        open-type="{{!canModifyToday ? '' : 'getPhoneNumber'}}"
+        bindgetphonenumber="getPhoneNumber"
+        bindtap="tapPhoneCell"
+      ></button>
+    </view>
+    <Cell wx:if="{{!isPrivateBackend}}" showArrow="{{!mpSubscribed}}" suffix="{{mpSubscribed ? _i18n['set.serviceAccountBound'] : _i18n['set.serviceAccountUnbound']}}" bindtap="onServiceAccountTap">
+      {{_i18n['set.bindServiceAccount']}}
+    </Cell>
+
+    <!-- 外观 -->
+    <view class="group-title">{{_i18n['set.groupAppearance'] || ''}}</view>
+    <Cell showArrow suffix="{{themeModeLabel}}" bindtap="onThemeTap">
+      {{_i18n['set.darkMode']}}
+    </Cell>
+    <Cell showArrow suffix="{{languageLabel}}" bindtap="onLanguageTap">
+      {{_i18n['set.language']}}
+    </Cell>
+
+    <!-- 常用 -->
+    <view class="group-title">{{_i18n['set.groupCommon'] || ''}}</view>
+    <Cell showArrow bindtap="goCommonAddresses">{{_i18n['set.commonAddressesManage']}}</Cell>
+    <Cell
+      class="cell"
+      bindtap="onAddToDesktop"
+      showArrow
+    >{{_i18n['set.addToDesktop']}}
+    </Cell>
+  </view>
+    </view>
+  </scroll-view>
+
+  <!-- 添加到桌面引导 -->
+  <view class="desktop-guide" wx:if="{{showDesktopGuide}}" bindtap="onDesktopGuideClose">
+    <view class="desktop-guide-mask"></view>
+    <view class="desktop-guide-content" catchtap="onDesktopGuideContentTap">
+      <view
+        class="desktop-guide-hint"
+        style="top: {{desktopGuideHintTop}}px; right: {{desktopGuideHintRight}}px;"
+      >
+        <view class="desktop-guide-arrow">
+          <view class="desktop-guide-arrow-body"></view>
+          <view class="desktop-guide-arrow-head"></view>
+        </view>
+        <view class="desktop-guide-text">{{_i18n['set.desktopGuide']}}</view>
+        <view
+          wx:if="{{desktopGuideCanOpenSettings}}"
+          class="desktop-guide-setting"
+          bindtap="onDesktopGuideOpenSettings"
+        >{{_i18n['set.openSettings']}}</view>
+        <view class="desktop-guide-close" bindtap="onDesktopGuideClose">{{_i18n['common.know']}}</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 绑定服务号弹窗 -->
+  <view class="official-account-dialog" wx:if="{{showOfficialAccountDialog}}">
+    <view class="official-account-mask" bindtap="onOfficialAccountDialogClose"></view>
+    <view class="official-account-content" catchtap="onOfficialAccountDialogContentTap">
+      <view class="official-account-title">{{_i18n['set.bindServiceAccount'] || ''}}</view>
+      <view class="official-account-body">
+        <image
+          class="official-account-qrcode"
+          src="{{followImgUrl}}"
+          mode="widthFix"
+          show-menu-by-longpress="{{true}}"
+          bindtap="onOfficialAccountQrcodeTap"
+        />
+      </view>
+      <view class="official-account-footer">
+        <view class="official-account-close-btn" bindtap="onOfficialAccountDialogClose">{{_i18n['common.cancel'] || ''}}</view>
+      </view>
+    </view>
+  </view>
+
+  <Drawer wx:if="{{showNicknameDrawer}}" initMainHeight="300" bind:handMask="hiddenNicknameDrawer">
+    <view class="drawer-content">
+      <view class="drawer-title">{{_i18n['set.setNickname']}}</view>
+      <input
+        type="nickname"
+        class="nickname-input"
+        value="{{tempNickname}}"
+        placeholder="{{_i18n['set.nicknamePlaceholder']}}"
+        bind:input="onNicknameInput"
+      />
+      <view class="drawer-btns">
+        <view class="cancel-btn" bindtap="hiddenNicknameDrawer">{{_i18n['common.cancel']}}</view>
+        <view class="save-btn" bindtap="submitNickname">{{_i18n['common.confirm']}}</view>
+      </view>
+    </view>
+  </Drawer>
+</view>
+

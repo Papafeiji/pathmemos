@@ -1,0 +1,9 @@
+
+<cover-view class="web-nav-bar" style="padding-top: {{statusBarHeight}}px; height: {{navBarHeight}}px;">
+  <cover-view class="web-nav-bar__left" bindtap="goBack">
+    <cover-view class="web-nav-bar__back iconfont ppfjhoutui"></cover-view>
+  </cover-view>
+  <cover-view class="web-nav-bar__title">{{_i18n['webPage.title']}}</cover-view>
+  <cover-view class="web-nav-bar__right"></cover-view>
+</cover-view>
+<web-view wx:if="{{url}}" src="{{url}}" binderror="onLoadError" style="margin-top: {{navBarHeight + statusBarHeight}}px;"></web-view>

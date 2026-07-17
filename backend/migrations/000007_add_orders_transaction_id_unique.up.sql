@@ -1,0 +1,1 @@
+-- baseline 已包含等价的 uq_orders_transaction_id_not_null 索引，无需重复创建。

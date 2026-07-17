@@ -1,0 +1,54 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar title="{{_i18n['family.title'] || ''}}" fallback-url="/pages/User/User">
+  </navigation-bar>
+  <scroll-view
+    class="scrollarea"
+    scroll-y
+    type="list"
+    enhanced
+    scroll-anchoring
+  >
+    <view class="scrollarea-main">
+      <view class="tips">
+        <view class="tips-title">{{_i18n['family.createTitle']}}</view>
+        <view class="tips-desc">{{_i18n['family.createDesc']}}</view>
+      </view>
+
+      <view class="section-title">{{_i18n['family.members'].replace('{{count}}', familyList.length)}}</view>
+      <view class="member-list">
+        <view class="item" wx:for="{{familyList}}" wx:key="familyMemberId">
+          <image mode="aspectFill" src="{{item.familyMemberAvatar}}" lazy-load />
+          <view class="info">
+            <block wx:if="{{item.isSelf}}">
+              <text class="name">{{_i18n['family.self']}}{{item.familyMemberNickName ? '(' + item.familyMemberNickName + ')' : ''}}</text>
+            </block>
+            <block wx:else>
+              <text class="name">{{item.familyMemberNickName}}</text>
+            </block>
+          </view>
+          <view wx:if="{{isLogin && !item.isOwner && (baseInfo.userId === ownerId || item.isSelf)}}" class="remove" bindtap="quitFamily" data-id="{{item.familyMemberId}}">{{item.isSelf ? _i18n['family.quitFamily'] : _i18n['family.remove']}}</view>
+        </view>
+      </view>
+    </view>
+  </scroll-view>
+
+  <view class="tool" wx:if="{{isLogin}}">
+    <button open-type="share" class="tool-btn share" disabled="{{!shareReady}}">
+      <text>{{_i18n['family.inviteFamily']}}</text>
+    </button>
+    <view class="tool-btn index" bindtap="toIndex">{{_i18n['family.viewDiary']}}</view>
+  </view>
+
+  <ConfirmDialog
+    visible="{{confirmDialog.visible}}"
+    title="{{confirmDialog.title || ''}}"
+    content="{{confirmDialog.content || ''}}"
+    cancelText="{{confirmDialog.cancelText || ''}}"
+    confirmText="{{confirmDialog.confirmText || ''}}"
+    confirmType="{{confirmDialog.confirmType}}"
+    bind:cancel="onConfirmDialogCancel"
+    bind:confirm="onConfirmDialogConfirm"
+    bind:close="onConfirmDialogCancel"
+  />
+</view>

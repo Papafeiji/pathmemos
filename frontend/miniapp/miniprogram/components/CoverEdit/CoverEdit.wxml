@@ -1,0 +1,38 @@
+
+<Drawer
+  bind:handMask="hidden"
+  class="drawer-circle"
+  id="CoverEditDrawer"
+>
+  <view class="cover-edit-header">
+    <text class="cover-edit-title">{{_i18n['coverEdit.title']}}</text>
+    <text class="cover-edit-subtitle" wx:if="{{imageList.length}}">{{_i18n['coverEdit.count'].replace('{{count}}', imageList.length)}}</text>
+  </view>
+
+  <view wx:if="{{imageList.length}}" class="image-list">
+    <view
+      class="item {{item.filePath === coverImg ? 'active' : ''}}"
+      wx:for="{{imageList}}"
+      wx:key="filePath"
+      bindtap="setCoverImg"
+      data-img="{{item.filePath}}"
+      data-id="{{item.id}}"
+    >
+      <image
+        class="cover-img"
+        mode="aspectFill"
+        src="{{item.filePath}}"
+        lazy-load
+      />
+      <view class="selected-mask" wx:if="{{item.filePath === coverImg}}">
+        <image class="check-icon" src="../../image/checked.png" />
+      </view>
+    </view>
+  </view>
+  <view wx:else class="tip">{{_i18n['coverEdit.noImage']}}</view>
+
+  <view class="drawer-footer">
+    <view class="tool-btn cancel" bindtap="cancel">{{_i18n['coverEdit.cancel']}}</view>
+    <view class="tool-btn save" bindtap="submit">{{_i18n['coverEdit.save']}}</view>
+  </view>
+</Drawer>

@@ -1,0 +1,62 @@
+/* components/Drawer/Drawer.wxss */
+.Drawer {
+  background-color: var(--ppfj-mask);
+  z-index: 500;
+  width: 100vw;
+  height: 100vh;
+  position: fixed;
+  top: 0;
+  left: 0;
+
+  .main {
+    width: 100vw;
+    background-color: var(--ppfj-card-bg);
+    border-top-left-radius: 48rpx;
+    border-top-right-radius: 48rpx;
+    position: absolute;
+    left: 0;
+    bottom: 0;
+
+    &--no-scroll {
+      .drawer-content {
+        padding: 18rpx 48rpx 40rpx 48rpx;
+        box-sizing: border-box;
+      }
+    }
+
+    .handle {
+      width: 100vw;
+      height: 64rpx;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      .grabber-icon {
+        width: 72rpx;
+        height: 10rpx;
+      }
+    }
+
+    .scrollarea {
+      height: 100%;
+      box-sizing: border-box;
+
+      .scrollarea-main {
+        margin: 0 auto;
+        padding-bottom: 100rpx;
+        padding: 18rpx 48rpx 40rpx 48rpx;
+        min-height: 100%;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        width: auto;
+      }
+    }
+  }
+  &.transition {
+    transition: 0.3s;
+    .main {
+      transition: 0.3s;
+    }
+  }
+}

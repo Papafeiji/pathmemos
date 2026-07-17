@@ -1,0 +1,57 @@
+
+<view class="BasePage invite-page" data-theme="{{theme}}">
+  <navigation-bar
+    title="{{_i18n['invite.title'] || ''}}"
+    back="{{true}}"
+    fallback-url="/pages/User/User"
+  ></navigation-bar>
+
+  <scroll-view
+    class="scrollarea"
+    scroll-y
+    type="list"
+    enhanced
+    scroll-anchoring
+  >
+    <view class="scrollarea-main">
+      <view class="tips">
+        <view class="tips-title">{{_i18n['invite.rewardTitle']}}</view>
+        <view class="tips-desc">{{_i18n['invite.rewardDesc']}}</view>
+      </view>
+
+      <view class="list-title">{{_i18n['invite.listTitle']}}</view>
+
+      <view class="invite-list">
+        <block wx:if="{{list.length}}">
+          <view class="invite-item" wx:for="{{list}}" wx:key="userId">
+            <image class="avatar" src="{{item.avatarUrl || '/image/papa_logo.png'}}" />
+            <view class="info">
+              <view class="nick-name">{{item.nickName || _i18n['invite.wechatUser']}}</view>
+            </view>
+            <block wx:if="{{item.joined}}">
+              <view class="corner-badge">{{_i18n['invite.joined']}}</view>
+            </block>
+            <block wx:else>
+              <button open-type="share"
+                class="invite-family-btn"
+                data-share-type="family"
+                disabled="{{!shareReady}}"
+              >{{_i18n['invite.inviteJoinFamily']}}</button>
+              <view class="corner-badge">{{_i18n['invite.registered']}}</view>
+            </block>
+          </view>
+        </block>
+        <view wx:elif="{{!loading}}" class="empty">{{_i18n['invite.empty']}}</view>
+      </view>
+
+      <view class="bottom-safe"></view>
+    </view>
+  </scroll-view>
+
+  <view class="tool">
+    <button open-type="share" class="tool-btn share">
+      <text>{{_i18n['invite.shareFriend']}}</text>
+    </button>
+    <view class="tool-btn index" bindtap="saveShareImage">{{_i18n['invite.shareMoment']}}</view>
+  </view>
+</view>

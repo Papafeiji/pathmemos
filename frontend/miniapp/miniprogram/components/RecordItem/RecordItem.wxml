@@ -1,0 +1,66 @@
+
+<view class="record-item {{isLast ? 'isLast' : ''}} {{isTouchLeft ? 'isTouchLeft' : ''}}">
+  <view
+    class="record-body"
+    bindtouchstart="touchStart"
+    bindtouchmove="touchMove"
+    bindtouchend="touchEnd"
+    catchtap="bindEdit"
+  >
+    <view class="dot" style="background-color: {{dotColor}}; box-shadow: 0 2rpx 6rpx {{dotShadow}};"></view>
+    <text class="time">{{data.recordTime}}</text>
+    <view class="main">
+      <view class="address-row" wx:if="{{data.diaryAddress}}">
+        <view class="address">
+          <image class="addr-icon" src="../../image/icon_address.png" mode="aspectFit" />
+          <text class="address-text">{{data.diaryAddress}}</text>
+          <text wx:if="{{data.showFamilyName}}" class="family-name">{{data.familyMemberNickName}}</text>
+        </view>
+        <view class="nav-btn" catchtap="openLocation">
+          <image class="nav-icon" src="../../image/icon_arrow_right.png" mode="aspectFit" />
+        </view>
+      </view>
+
+      <view class="content {{launch ? 'launch' : ''}}">
+        <text class="content-text">{{data.recordText || ''}}</text>
+      </view>
+
+      <view wx:if="{{data.showMore}}" class="more">
+        <view wx:if="{{launch}}" catchtap="doLaunch" class="btn">{{_i18n['recordItem.collapse']}}</view>
+        <view wx:else catchtap="doLaunch" class="btn">{{_i18n['recordItem.expand']}}</view>
+      </view>
+
+      <view class="imgs {{data.images.length === 1 ? 'single' : ''}}" wx:if="{{data.images.length}}">
+        <image
+          wx:for="{{data.images}}"
+          wx:key="id"
+          class="record-img"
+          mode="aspectFill"
+          catchtap="handPreviewImage"
+          data-src="{{item.filePath}}"
+          data-images="{{data.images}}"
+          data-item-index="{{item.itemIndex}}"
+          data-img-index="{{item.imgIndex}}"
+          src="{{item.filePath || '../../image/default-bg.png'}}"
+          lazy-load
+        />
+      </view>
+    </view>
+  </view>
+
+  <view class="del-container {{isTouchLeft ? 'isTouchLeft' : ''}}" bindtap="del">
+    <image class="del-icon" src="../../image/icon_del.png" mode="aspectFit" />
+  </view>
+</view>
+
+<ConfirmDialog
+  visible="{{confirmDialog.visible}}"
+  title="{{confirmDialog.title || ''}}"
+  content="{{confirmDialog.content || ''}}"
+  cancelText="{{confirmDialog.cancelText || ''}}"
+  confirmText="{{confirmDialog.confirmText || ''}}"
+  confirmType="{{confirmDialog.confirmType}}"
+  bind:cancel="onConfirmDialogCancel"
+  bind:confirm="onConfirmDialogConfirm"
+  bind:close="onConfirmDialogCancel"
+/>

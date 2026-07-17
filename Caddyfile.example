@@ -1,0 +1,14 @@
+# PathMemos Open Caddy 配置模板
+# 使用方式：
+#   1. 填写你的域名（替换 your-domain.com）
+#   2. 在 .env 中将 NGINX_HTTP_PORT 改为非 80 端口（如 8080），把 80 端口释放给 Caddy，
+#      并重启 nginx：docker compose up -d nginx
+#   3. docker compose --profile https up -d caddy
+#   4. 更新 .env 中 API_HOST=https://your-domain.com 并重启 app
+#
+# Caddy 自动申请和管理 Let's Encrypt 证书。
+# 使用前请确保域名 DNS 已指向本机 IP，且 80/443 端口未被占用。
+
+your-domain.com {
+    reverse_proxy nginx:80
+}

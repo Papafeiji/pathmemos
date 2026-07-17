@@ -1,0 +1,43 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar
+    title="{{_i18n['about.title'] || ''}}"
+    back
+  ></navigation-bar>
+  <scroll-view class="scrollarea" scroll-y type="list" enhanced scroll-anchoring>
+    <view class="scrollarea-main">
+      <view class="main">
+        <view class="head">
+          <image src="../../../image/papa_logo.png" lazy-load />
+        </view>
+      </view>
+
+      <view class="cell-view">
+        <Cell bindtap="toChat" showArrow>{{_i18n['about.contactService']}}</Cell>
+        <Cell bindtap="toGuide" showArrow>{{_i18n['about.usageGuide']}}</Cell>
+        <Cell bindtap="openByPrivacyPolicy" showArrow>{{_i18n['about.privacyPolicy']}}</Cell>
+        <Cell bindtap="openByServices" showArrow>{{_i18n['about.aiService']}}</Cell>
+        <Cell bindtap="destruction" showArrow>{{_i18n['about.deleteAccount']}}</Cell>
+      </view>
+
+      <text wx:if="{{!isPrivateBackend}}" class="fili">{{_i18n['about.icp']}}</text>
+    </view>
+  </scroll-view>
+
+  <ConfirmDialog
+    visible="{{confirmDialog.visible}}"
+    title="{{confirmDialog.title || ''}}"
+    content="{{confirmDialog.content || ''}}"
+    showInput="{{true}}"
+    inputValue="{{deleteConfirmInput}}"
+    inputPlaceholder="{{_i18n['about.deleteInputPlaceholder'] || ''}}"
+    cancelText="{{confirmDialog.cancelText || ''}}"
+    confirmText="{{confirmDialog.confirmText || ''}}"
+    confirmType="{{confirmDialog.confirmType}}"
+    confirmDisabled="{{deleting || !canConfirmDelete}}"
+    bind:cancel="onConfirmDialogCancel"
+    bind:confirm="onConfirmDialogConfirm"
+    bind:close="onConfirmDialogCancel"
+    bind:input="onDeleteInput"
+  />
+</view>

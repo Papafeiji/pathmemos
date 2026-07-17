@@ -1,0 +1,177 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <view
+    class="custom-nav {{isScrollTop ? 'transparent' : 'solid'}} {{theme === 'dark' ? 'custom-nav--dark' : ''}}"
+    style="height: {{navStyle.navHeight}}px; padding-top: {{navStyle.statusBarHeight}}px;"
+  >
+    <view class="nav-inner" style="{{navStyle.innerStyle}}">
+      <view class="nav-back" bindtap="goBack" style="{{navStyle.backStyle}}">
+        <view class="back-arrow"></view>
+      </view>
+    </view>
+  </view>
+
+  <view class="share-float {{_generatingShare ? 'generating' : ''}}" bindtap="onShareMoment" style="{{navStyle.shareFloatStyle}}">
+    <text>{{_generatingShare ? _i18n['noteDetail.generating'] : _i18n['noteDetail.share']}}</text>
+  </view>
+
+  <scroll-view
+    class="scrollarea"
+    scroll-y
+    type="list"
+    enhanced
+    scroll-anchoring
+    upper-threshold="10"
+    bindscroll="scroll"
+    bindscrolltoupper="scrollToUpper"
+    bindscrolltolower="loadMore"
+  >
+    <view class="scrollarea-main">
+      <view class="cover-section">
+        <image
+          class="cover-img"
+          mode="aspectFill"
+          src="{{baseInfo.coverImg || '../../image/default-bg.png'}}"
+          lazy-load="true"
+        />
+        <view class="cover-mask"></view>
+        <view class="cover-header">
+          <view class="cover-date">
+            <text class="cover-day">{{headerDate.day}}</text>
+            <view class="cover-meta">
+              <text class="cover-year-month">{{headerDate.yearMonth}}</text>
+              <text class="cover-week">{{headerDate.weekDay}}</text>
+            </view>
+          </view>
+          <text class="cover-name" wx:if="{{baseInfo.dateName}}">{{baseInfo.dateName}}</text>
+        </view>
+        <view class="cover-actions">
+          <view class="cover-action auto-record-action">
+            <AutoBtn class="autoBtn" openAutoRecorded="{{openAutoRecorded}}" disableSubscribe="{{true}}" bind:change="onAutoRecordChange" bind:subscribeprompt="onSubscribeprompt" />
+          </view>
+          <view class="cover-action" bindtap="bindCircle">
+            <text>{{_i18n['noteDetail.changeCover']}}</text>
+          </view>
+        </view>
+      </view>
+
+      <view class="filter-section" wx:if="{{tabList.length > 1}}">
+        <view class="member-tabs">
+          <view
+            class="tab-item tab-all {{activeTabId === '' ? 'active' : ''}}"
+            bindtap="bindTabChange"
+            data-userid=""
+          >
+            <text class="tab-text">{{_i18n['noteDetail.all']}}</text>
+          </view>
+          <view
+            wx:for="{{tabList}}"
+            wx:key="userId"
+            class="tab-item {{activeTabId === item.userId ? 'active' : ''}}"
+            bindtap="bindTabChange"
+            data-userid="{{item.userId}}"
+          >
+            <image
+              class="tab-avatar"
+              src="{{item.avatarUrl || '../../image/logo.png'}}"
+              mode="aspectFill"
+              lazy-load
+            />
+          </view>
+        </view>
+      </view>
+
+      <view wx:if="{{isEmpty}}" class="empty-state">
+        <image class="empty-icon" src="../../image/empty.png" mode="aspectFit" />
+        <text class="empty-title">{{_i18n['noteDetail.noRecord']}}</text>
+        <text class="empty-tip">{{_i18n['noteDetail.noRecordTip']}}</text>
+      </view>
+
+      <block wx:if="{{!isEmpty}}">
+        <view class="timeline">
+          <block wx:for="{{filteredList}}" wx:key="id">
+            <MemoryItem
+              wx:if="{{item.source === 'memory'}}"
+              info="{{item}}"
+              isLast="{{index === filteredList.length - 1}}"
+              index="{{index}}"
+              user-id="{{currentUserId}}"
+              bind:handEdit="bindMemoryEdit"
+              bind:del="bindMemoryDel"
+            />
+            <RecordItem
+              wx:else
+              info="{{item}}"
+              isLast="{{index === filteredList.length - 1}}"
+              index="{{index}}"
+              user-id="{{currentUserId}}"
+              bind:handEdit="bindEdit"
+              bind:del="bindDel"
+            />
+          </block>
+        </view>
+
+        <view class="loading-more" wx:if="{{_loading}}">
+          <view class="loading-dot"></view>
+          <view class="loading-dot"></view>
+          <view class="loading-dot"></view>
+        </view>
+        <view class="no-more" wx:if="{{!_loading && !hasMore && !isEmpty}}">{{_i18n['noteDetail.noMore']}}</view>
+      </block>
+
+      <view class="bottom-safe"></view>
+    </view>
+  </scroll-view>
+
+  <CoverEdit
+    info="{{baseInfo}}"
+    imageList="{{imageList}}"
+    wx:if="{{showCircleDrawer}}"
+    bind:hidden="hiddenCircleDrawer"
+    bind:submit="setCoverImg"
+  >
+  </CoverEdit>
+
+  <view class="tool" wx:if="{{isLogin && !showCircleDrawer && !showEditDrawer && !showMemoryEditDrawer && !showMemoryCreateDrawer && !showAIDrawer}}">
+    <view class="tool-btn add" bindtap="doShowEditDrawer" bindlongpress="doShowMemoryCreateDrawer">
+      <text>{{_i18n['noteDetail.add']}}</text>
+      <image class="icon-add" src="../../image/icon_add.png" />
+    </view>
+    <view class="tool-btn ai" bindtap="doShowAIDrawer">
+      <text>{{_i18n['noteDetail.aiAssistant']}}</text>
+      <image class="icon-ai" src="../../image/logo.png" />
+    </view>
+  </view>
+
+  <NoteEdit
+    info="{{nowInfo}}"
+    openAutoRecord="{{openAutoRecorded}}"
+    wx:if="{{showEditDrawer}}"
+    bind:hidden="hiddenEditDrawer"
+    bind:submit="reloadAfterEdit"
+  ></NoteEdit>
+
+  <MemoryEdit
+    info="{{memoryEditInfo}}"
+    wx:if="{{showMemoryEditDrawer}}"
+    bind:hidden="hiddenMemoryEditDrawer"
+    bind:submit="onMemoryEditSubmit"
+  ></MemoryEdit>
+
+  <MemoryEdit
+    info="{{memoryCreateInfo}}"
+    wx:if="{{showMemoryCreateDrawer}}"
+    bind:hidden="hiddenMemoryCreateDrawer"
+    bind:submit="onMemoryCreateSubmit"
+  ></MemoryEdit>
+
+  <SubscribePrompt
+    visible="{{showSubscribePrompt}}"
+    bind:confirm="onSubscribeConfirm"
+    bind:cancel="onSubscribeCancel"
+  />
+
+  <AIDrawer wx:if="{{showAIDrawer}}" id="aiDrawer" bind:hidden="hiddenAIDrawer"></AIDrawer>
+
+  <canvas type="2d" id="shareCanvas" class="share-canvas" style="width:1px;height:1px;"></canvas>
+</view>

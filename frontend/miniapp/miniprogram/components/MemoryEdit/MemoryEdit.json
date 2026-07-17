@@ -1,0 +1,9 @@
+{
+  "component": true,
+  "styleIsolation": "apply-shared",
+  "usingComponents": {
+    "Drawer": "/components/Drawer/Drawer",
+    "CalendarPicker": "/components/CalendarPicker/CalendarPicker",
+    "TimePicker": "/components/TimePicker/TimePicker"
+  }
+}

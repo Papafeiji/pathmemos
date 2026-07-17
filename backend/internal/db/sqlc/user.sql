@@ -1,0 +1,97 @@
+-- name: GetUserByOpenID :one
+SELECT id, open_id, unionid, phone_number, avatar, avatar_file_id, nickname, user_type, phone_bind_time, auto_record_enabled, personal_family_id, current_family_id, invited_by, lang, created_at, updated_at, abnormal_subscribe_accepted, last_active_at FROM users WHERE open_id = $1;
+
+-- name: GetUserByUnionID :one
+SELECT id, open_id, unionid, phone_number, avatar, avatar_file_id, nickname, user_type, phone_bind_time, auto_record_enabled, personal_family_id, current_family_id, invited_by, lang, created_at, updated_at, abnormal_subscribe_accepted, last_active_at FROM users WHERE unionid = $1;
+
+-- name: GetUserByID :one
+SELECT id, open_id, unionid, phone_number, avatar, avatar_file_id, nickname, user_type, phone_bind_time, auto_record_enabled, personal_family_id, current_family_id, invited_by, lang, created_at, updated_at, abnormal_subscribe_accepted, last_active_at FROM users WHERE id = $1;
+
+-- name: GetUserByIDForUpdate :one
+SELECT id, open_id, unionid, phone_number, avatar, avatar_file_id, nickname, user_type, phone_bind_time, auto_record_enabled, personal_family_id, current_family_id, invited_by, lang, created_at, updated_at, abnormal_subscribe_accepted, last_active_at FROM users WHERE id = $1 FOR UPDATE;
+
+-- name: GetUserSessionKeyByID :one
+SELECT session_key FROM users WHERE id = $1;
+
+-- name: CreateUser :one
+INSERT INTO users (
+    id, open_id, unionid, phone_number, avatar, avatar_file_id, nickname,
+    user_type, phone_bind_time, auto_record_enabled, session_key,
+    personal_family_id, current_family_id, invited_by, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
+RETURNING *;
+
+-- name: UpdateUserSessionKey :exec
+UPDATE users SET session_key = $2, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUserUnionID :exec
+UPDATE users SET unionid = $2, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUserAvatar :exec
+UPDATE users SET avatar = $2, avatar_file_id = $3, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUserNickname :exec
+UPDATE users SET nickname = $2, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUserPhone :exec
+UPDATE users SET phone_number = $2, phone_bind_time = $3, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUserCurrentFamily :exec
+UPDATE users SET current_family_id = $2, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUsersCurrentFamily :exec
+UPDATE users SET current_family_id = $2, updated_at = now() WHERE id = ANY($1::text[]);
+
+-- name: BatchUpdateUsersCurrentFamilyToPersonal :exec
+UPDATE users u SET current_family_id = p.personal_family_id, updated_at = now()
+FROM (
+    SELECT unnest(@user_ids::text[]) AS user_id, unnest(@personal_family_ids::text[]) AS personal_family_id
+) AS p
+WHERE u.id = p.user_id;
+
+-- name: UpdateUserPersonalFamily :exec
+UPDATE users SET personal_family_id = $2, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUserLang :exec
+UPDATE users SET lang = $2, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUserAutoRecord :exec
+UPDATE users SET auto_record_enabled = $2, updated_at = now() WHERE id = $1;
+
+-- name: UpdateUserAlertSubscribe :exec
+UPDATE users SET
+    abnormal_subscribe_accepted = $2,
+    updated_at = now()
+WHERE id = $1;
+
+-- name: UpdateUserLastActiveAt :exec
+UPDATE users SET last_active_at = now(), updated_at = now() WHERE id = $1;
+
+-- name: MarkAbnormalAlertSent :execrows
+UPDATE users
+SET abnormal_alert_sent_at = now(),
+    updated_at = now()
+WHERE id = $1
+  AND (
+      abnormal_alert_sent_at IS NULL
+      OR (abnormal_alert_sent_at AT TIME ZONE 'Asia/Shanghai')::date < (now() AT TIME ZONE 'Asia/Shanghai')::date
+  );
+
+
+-- name: DeleteUser :exec
+DELETE FROM users WHERE id = $1;
+
+-- name: UpsertUserAvatarMarker :exec
+INSERT INTO user_avatar_markers (user_id, marker_path, storage_type, updated_at)
+VALUES ($1, $2, $3, now())
+ON CONFLICT (user_id)
+DO UPDATE SET
+    marker_path = EXCLUDED.marker_path,
+    storage_type = EXCLUDED.storage_type,
+    updated_at = now();
+
+-- name: GetUserAvatarMarker :one
+SELECT marker_path, storage_type FROM user_avatar_markers WHERE user_id = $1;
+
+-- name: GetUserAvatarMarkersByIDs :many
+SELECT user_id, marker_path, storage_type FROM user_avatar_markers WHERE user_id = ANY($1::text[]);

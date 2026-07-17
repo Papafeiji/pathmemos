@@ -1,0 +1,156 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://papafeiji:${DB_PASSWORD}@postgres:5432/papafeiji?sslmode=disable
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - WECHAT_APPID=${WECHAT_APPID:-}
+      - WECHAT_SECRET=${WECHAT_SECRET:-}
+      - WECHAT_MP_APPID=${WECHAT_MP_APPID:-}
+      - WECHAT_MP_SECRET=${WECHAT_MP_SECRET:-}
+      - WECHAT_MP_GHID=${WECHAT_MP_GHID:-}
+      - WECHAT_MINI_LINK_ENV_VERSION=${WECHAT_MINI_LINK_ENV_VERSION:-release}
+      - WECHAT_VIRTUAL_OFFER_ID=${WECHAT_VIRTUAL_OFFER_ID:-}
+      - WECHAT_VIRTUAL_APP_KEY_PRODUCTION=${WECHAT_VIRTUAL_APP_KEY_PRODUCTION:-}
+      - WECHAT_VIRTUAL_APP_KEY_SANDBOX=${WECHAT_VIRTUAL_APP_KEY_SANDBOX:-}
+      - WECHAT_MSG_TOKEN=${WECHAT_MSG_TOKEN:-}
+      - WECHAT_ENCODING_AES_KEY=${WECHAT_ENCODING_AES_KEY:-}
+      - TENCENT_MAP_KEY=${TENCENT_MAP_KEY}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_BASE_URL=${AI_BASE_URL:-https://api.deepseek.com}
+      - AI_MODEL=${AI_MODEL:-deepseek-chat}
+      - API_HOST=${API_HOST:-http://localhost:8080}
+      - MCP_PUBLIC_URL=${MCP_PUBLIC_URL:-}
+      - TRUSTED_PROXY_CIDR=${TRUSTED_PROXY_CIDR:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16,127.0.0.0/8}
+      - WORKER_SECRET=${WORKER_SECRET:-}
+      - OPEN_API_KEY=${OPEN_API_KEY:-}
+      - STORAGE_LOCAL_PATH=/opt/pathmemos/uploads
+      - DEPLOYMENT_MODE=open
+      - HTTP_BIND=0.0.0.0
+      - HTTP_PORT=8080
+      - SSE_BIND=0.0.0.0
+      - SSE_PORT=8081
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./uploads:/opt/pathmemos/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx.open.conf:/etc/nginx/nginx.conf:ro
+      - ./uploads:/opt/pathmemos/uploads:ro
+      - ./deploy/assets:/opt/pathmemos/deploy/assets:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    restart: unless-stopped
+    profiles:
+      - tunnel
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: papafeiji
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: papafeiji
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U papafeiji -d papafeiji"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"${REDIS_PASSWORD}\" redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backup:
+    image: alpine:3.21
+    entrypoint: |
+      /bin/sh -c '
+        apk add --no-cache postgresql15-client >/dev/null
+        while true; do
+          KEEP=${BACKUP_KEEP:-7}
+          OUTPUT="/backups"
+          mkdir -p "$$OUTPUT"
+          TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+
+          echo "[backup] db -> $$OUTPUT/db_$$TIMESTAMP.sql.gz"
+          PGPASSWORD=$$DB_PASSWORD pg_dump -h postgres -U papafeiji papafeiji | gzip > "$$OUTPUT/db_$$TIMESTAMP.sql.gz"
+
+          echo "[backup] uploads -> $$OUTPUT/uploads_$$TIMESTAMP.tar.gz"
+          tar czf "$$OUTPUT/uploads_$$TIMESTAMP.tar.gz" -C /opt/uploads .
+
+          for prefix in db_ uploads_; do
+            ls -1t "$$OUTPUT"/$${prefix}* 2>/dev/null | tail -n +$$((KEEP + 1)) | while read -r f; do
+              rm -f "$$f"
+            done || true
+          done
+
+          echo "[backup] done, next in 6h"
+          sleep 21600
+        done
+      '
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD}
+      BACKUP_KEEP: ${BACKUP_KEEP:-7}
+    volumes:
+      - ./backups:/backups
+      - ./uploads:/opt/uploads:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # 备份服务默认启用，可通过 --scale backup=0 禁用，或修改此处关闭
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy_data:/data
+    depends_on:
+      - nginx
+    restart: unless-stopped
+    profiles:
+      - https
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,11 @@
+{
+  "usingComponents": {
+    "navigation-bar": "/components/navigation-bar/navigation-bar",
+    "NoteItem": "/components/NoteItem/NoteItem",
+    "NoteEdit": "/components/NoteEdit/NoteEdit",
+    "MemoryEdit": "/components/MemoryEdit/MemoryEdit",
+    "AIDrawer": "/components/AIDrawer/AIDrawer",
+    "SubscribePrompt": "/components/SubscribePrompt/SubscribePrompt"
+  },
+  "renderer": "webview"
+}

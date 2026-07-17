@@ -1,0 +1,51 @@
+// Package redis provides Redis client initialization helpers.
+package redis
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+func NewClient(addr string) (*redis.Client, error) {
+	if addr == "" {
+		return nil, fmt.Errorf("redis addr is empty")
+	}
+
+	var opt *redis.Options
+	if strings.HasPrefix(addr, "redis://") || strings.HasPrefix(addr, "rediss://") {
+		parsed, err := redis.ParseURL(addr)
+		if err != nil {
+			return nil, fmt.Errorf("parse redis url: %w", err)
+		}
+		opt = parsed
+	} else {
+		opt = &redis.Options{
+			Addr:     addr,
+			Password: os.Getenv("REDIS_PASSWORD"),
+		}
+	}
+	opt.PoolSize = 50
+	if v := os.Getenv("REDIS_POOL_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n < 10 {
+				opt.PoolSize = 10
+			} else {
+				opt.PoolSize = n
+			}
+		}
+	}
+	opt.MinIdleConns = 5
+	opt.DialTimeout = 5 * time.Second
+	opt.ReadTimeout = 3 * time.Second
+	opt.WriteTimeout = 3 * time.Second
+
+	rdb := redis.NewClient(opt)
+
+	// 不再在启动时强依赖 Ping；请求级失败仍按原则返回错误，不降级。
+	return rdb, nil
+}

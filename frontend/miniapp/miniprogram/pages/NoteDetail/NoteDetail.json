@@ -1,0 +1,14 @@
+{
+  "navigationStyle": "custom",
+  "usingComponents": {
+    "AutoBtn": "/components/AutoBtn/AutoBtn",
+    "RecordItem": "/components/RecordItem/RecordItem",
+    "MemoryItem": "/components/MemoryItem/MemoryItem",
+    "NoteEdit": "/components/NoteEdit/NoteEdit",
+    "MemoryEdit": "/components/MemoryEdit/MemoryEdit",
+    "CoverEdit": "/components/CoverEdit/CoverEdit",
+    "AIDrawer": "/components/AIDrawer/AIDrawer",
+    "SubscribePrompt": "/components/SubscribePrompt/SubscribePrompt"
+  },
+  "renderer": "webview"
+}

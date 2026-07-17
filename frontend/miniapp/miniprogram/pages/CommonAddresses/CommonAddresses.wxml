@@ -1,0 +1,77 @@
+
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar title="{{_i18n['commonAddresses.title'] || ''}}" back></navigation-bar>
+
+  <scroll-view class="scrollarea" scroll-y type="list" enhanced scroll-anchoring>
+    <view class="scrollarea-main">
+      <view class="tips">
+        <view class="tips-title">{{_i18n['commonAddresses.tipTitle']}}</view>
+        <view class="tips-desc">
+          <view class="tip-paragraph">
+            <text>{{_i18n['commonAddresses.tipParagraph1Prefix']}}</text>
+            <text class="tip-highlight">{{_i18n['commonAddresses.tipCompany']}}</text>
+            <text>{{_i18n['commonAddresses.tipConnector']}}</text>
+            <text class="tip-highlight">{{_i18n['commonAddresses.tipHome']}}</text>
+            <text>{{_i18n['commonAddresses.tipParagraph1Suffix']}}</text>
+            <text class="tip-highlight">{{_i18n['commonAddresses.tipHighlightAutoReplace']}}</text>
+            <text>{{_i18n['commonAddresses.tipParagraph1Suffix2']}}</text>
+          </view>
+          <view class="tip-paragraph">
+            <text>{{_i18n['commonAddresses.tipParagraph2Prefix']}}</text>
+            <text class="tip-highlight">{{_i18n['commonAddresses.tipHighlightUnify']}}</text>
+            <text>{{_i18n['commonAddresses.tipParagraph2Suffix']}}</text>
+          </view>
+        </view>
+      </view>
+
+      <view class="edit-hint" wx:if="{{addresses.length > 0}}">
+        <text class="edit-hint-text">{{_i18n['commonAddresses.editHint']}}</text>
+      </view>
+
+      <view class="cell-view" wx:if="{{addresses.length > 0}}">
+        <view
+          class="address-cell"
+          wx:for="{{addresses}}"
+          wx:key="name"
+          data-index="{{index}}"
+          bindtap="onAddressTap"
+        >
+          <view class="address-name">{{item.name}}</view>
+          <view class="address-count">{{_i18n['commonAddresses.count'].replace('{{count}}', item.count)}}</view>
+        </view>
+      </view>
+
+      <view class="empty-state" wx:if="{{!loading && addresses.length === 0}}">
+        <view class="empty-icon">
+          <view class="empty-icon-circle">
+            <text class="empty-icon-text">📍</text>
+          </view>
+        </view>
+        <view class="empty-title">{{_i18n['commonAddresses.emptyTitle']}}</view>
+        <view class="empty-sub">{{_i18n['commonAddresses.emptySub']}}</view>
+      </view>
+    </view>
+  </scroll-view>
+
+  <Drawer wx:if="{{showEditDrawer}}" initMainHeight="320" bind:handMask="hiddenEditDrawer">
+    <view class="drawer-content">
+      <view class="drawer-title">{{_i18n['commonAddresses.editTitle']}}</view>
+      <input
+        type="text"
+        class="name-input"
+        value="{{tempName}}"
+        placeholder="{{_i18n['commonAddresses.placeholder']}}"
+        maxlength="100"
+        bind:input="onNameInput"
+      />
+      <view class="preset-tags">
+        <view class="preset-tag" data-name="{{_i18n['commonAddresses.home']}}" bindtap="onPresetTap">{{_i18n['commonAddresses.home']}}</view>
+        <view class="preset-tag" data-name="{{_i18n['commonAddresses.company']}}" bindtap="onPresetTap">{{_i18n['commonAddresses.company']}}</view>
+      </view>
+    </view>
+    <view class="drawer-footer">
+      <view class="tool-btn cancel-btn" bindtap="hiddenEditDrawer">{{_i18n['common.cancel']}}</view>
+      <view class="tool-btn save-btn" bindtap="submitName">{{_i18n['common.save']}}</view>
+    </view>
+  </Drawer>
+</view>

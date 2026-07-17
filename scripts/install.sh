@@ -1,0 +1,886 @@
+#!/bin/bash
+# 爬爬记忆助手【PathMemos】一键安装脚本
+#
+# 用法：
+# curl -fsSL https://raw.githubusercontent.com/Papafeiji/pathmemos/open/scripts/install.sh | bash
+#
+# 前置准备：
+#   - 一台 Linux 服务器（建议 Ubuntu 22.04+，需 apt 包管理器）
+#   - root 权限（脚本会检测并使用 sudo）
+#   - AI API Key（DeepSeek / OpenAI 等）
+#   - 腾讯地图 Key
+#   - Cloudflare API Token（仅「正式部署」模式需要；「临时测试」无需 Cloudflare 账号）
+#
+# Cloudflare API Token 权限要求（正式部署模式）：
+#   - Account: Account: Read
+#   - Account: Cloudflare Tunnel: Edit
+#   - Zone: DNS: Edit
+
+set -eo pipefail
+
+# ---------- 配置 ----------
+PATHMEMOS_REPO="https://github.com/Papafeiji/pathmemos.git"
+PATHMEMOS_BRANCH="open"
+PATHMEMOS_DIR="${PATHMEMOS_DIR:-/opt/pathmemos}"
+GUM_VERSION="${PATHMEMOS_GUM_VERSION:-0.15.2}"
+
+USE_SUDO=""
+
+# 支持 curl | bash 管道执行：此时 $0 不是脚本路径，本地无 lib/ui.sh，从仓库下载后加载。
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo ".")"
+if [[ -f "${_script_dir}/lib/ui.sh" ]]; then
+  source "${_script_dir}/lib/ui.sh"
+else
+  _ui_tmp="$(mktemp)"
+  # 脚本退出时统一清理下载的 ui.sh 临时文件
+  trap 'rm -f "$_ui_tmp"' EXIT
+  _ui_raw_url="https://raw.githubusercontent.com/Papafeiji/pathmemos/${PATHMEMOS_BRANCH}/scripts/lib/ui.sh"
+  if curl -fsSL --retry 2 --connect-timeout 5 --max-time 20 "$_ui_raw_url" -o "$_ui_tmp"; then
+    source "$_ui_tmp"
+  else
+    echo "无法下载远程代码仓库（$_ui_raw_url）。" >&2
+    echo "请改用手动方式：git clone -b ${PATHMEMOS_BRANCH} ${PATHMEMOS_REPO} && cd pathmemos && ./scripts/install.sh" >&2
+    exit 1
+  fi
+fi
+
+GUM="${GUM:-}"
+
+require_root() {
+  if [[ "$EUID" -eq 0 ]]; then
+    USE_SUDO=""
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    USE_SUDO="sudo"
+    return 0
+  fi
+  ui_error "需要 root 权限，请重试"
+  exit 1
+}
+
+run_as_root() {
+  if [[ -n "$USE_SUDO" ]]; then
+    $USE_SUDO "$@"
+  else
+    "$@"
+  fi
+}
+
+# 持久化安装 gum 到本地路径（install.sh 专用，与 lib/ui.sh 的临时版不同）
+bootstrap_gum() {
+  if ! is_tty; then GUM=""; return 1; fi
+  if command -v gum >/dev/null 2>&1; then
+    GUM="gum"
+    return 0
+  fi
+  if ! command -v tar >/dev/null 2>&1; then GUM=""; return 1; fi
+
+  local os arch asset base tmpdir gum_path
+  os=$(uname -s); arch=$(uname -m)
+  case "$os" in Darwin) os="Darwin" ;; Linux) os="Linux" ;; *) GUM=""; return 1 ;; esac
+  case "$arch" in x86_64|amd64) arch="x86_64" ;; arm64|aarch64) arch="arm64" ;; *) GUM=""; return 1 ;; esac
+
+  asset="gum_${GUM_VERSION}_${os}_${arch}.tar.gz"
+  base="https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}"
+  tmpdir=$(mktemp -d)
+  # 触发后自我清除：RETURN trap 不清除会在函数返回后残留为全局 trap
+  trap "rm -rf \"$tmpdir\"; trap - RETURN" RETURN
+
+  ui_info "正在下载安装程序..."
+  if ! curl -fsSL --retry 2 --connect-timeout 5 --max-time 20 "${base}/${asset}" -o "${tmpdir}/${asset}"; then
+    ui_warn "安装程序下载失败，将使用基础交互模式"; GUM=""; return 1
+  fi
+  if ! tar -xzf "${tmpdir}/${asset}" -C "$tmpdir" >/dev/null 2>&1; then
+    ui_warn "安装程序解压失败，将使用基础交互模式"; GUM=""; return 1
+  fi
+  gum_path=$(find "$tmpdir" -type f -name gum 2>/dev/null | head -n1)
+  [[ -z "$gum_path" ]] && { ui_warn "安装程序二进制未找到"; GUM=""; return 1; }
+  chmod +x "$gum_path"
+
+  local install_dir="/usr/local/bin"
+  if [[ -d "$install_dir" && -w "$install_dir" ]]; then
+    if ! run_as_root cp -f "$gum_path" "${install_dir}/gum"; then
+      ui_warn "安装程序复制失败，将使用基础交互模式"; GUM=""; return 1
+    fi
+  else
+    # 用户级安装目录必须在 PATHMEMOS_DIR 之外：clone_repo 的 git clone 要求目标目录不存在或为空
+    install_dir="${HOME:-${TMPDIR:-/tmp}}/.local/bin"
+    if ! mkdir -p "$install_dir" 2>/dev/null || ! cp -f "$gum_path" "${install_dir}/gum" 2>/dev/null; then
+      ui_warn "安装程序复制失败，将使用基础交互模式"; GUM=""; return 1
+    fi
+  fi
+  # 成功前验证二进制可执行，避免假成功导致后续调用失败
+  if [[ ! -x "${install_dir}/gum" ]]; then
+    ui_warn "安装程序二进制不可执行，将使用基础交互模式"; GUM=""; return 1
+  fi
+  GUM="${install_dir}/gum"
+  return 0
+}
+
+# ---------- 步骤 ----------
+check_prerequisites() {
+  if ! command -v curl >/dev/null 2>&1; then
+    ui_error "需要 curl，请先安装: apt-get install curl / yum install curl"
+    exit 1
+  fi
+
+  if ! command -v awk >/dev/null 2>&1; then
+    ui_error "需要 awk，请先安装"
+    exit 1
+  fi
+
+  # 磁盘空间检查：建议至少 10G 可用
+  local avail_gb
+  avail_gb=$(df -P -BG / | awk 'NR==2 {print int($4)}')
+  if [[ "$avail_gb" -lt 10 ]]; then
+    ui_warn "根分区仅剩 ${avail_gb}G，建议至少 10G 可用空间"
+    if ! _gum_confirm "空间不足，是否继续？" --default no; then
+      exit 0
+    fi
+  fi
+
+  # 端口检查：80 是否被占用
+  if command -v ss >/dev/null 2>&1; then
+    if ss -tln | awk '{print $4}' | grep -qE '(:80$|:80\b)'; then
+      ui_warn "本机 80 端口已被占用"
+      if ! _gum_confirm "80 端口被占用，是否继续？（继续可能导致 Nginx 启动失败）" --default no; then
+        exit 0
+      fi
+    fi
+  fi
+}
+
+install_git() {
+  if command -v git >/dev/null 2>&1; then
+    ui_success "git 已安装"
+    return 0
+  fi
+  ui_info "正在安装 git..."
+  if command -v apt-get >/dev/null 2>&1; then
+    run_as_root apt-get update -qq && run_as_root apt-get install -y -qq git
+  else
+    ui_error "请手动安装 git 后重试"
+    exit 1
+  fi
+  ui_success "git 安装完成"
+}
+
+ensure_jq() {
+  if command -v jq >/dev/null 2>&1; then
+    ui_success "jq 已就绪"
+    return 0
+  fi
+  ui_info "正在安装 jq..."
+  if command -v apt-get >/dev/null 2>&1; then
+    run_as_root apt-get update -qq && run_as_root apt-get install -y -qq jq
+  else
+    ui_error "请手动安装 jq 后重试"
+    exit 1
+  fi
+  ui_success "jq 安装完成"
+}
+
+docker_is_ready() {
+  command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
+}
+
+# 后续所有 docker compose 命令均不带 sudo：非 root 用户若无 docker socket 权限，
+# 与其在每处包装 sudo，不如在此一次性拦截并给出明确指引（简单优先）。
+ensure_docker_socket_access() {
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -n "$USE_SUDO" ]]; then
+    ui_error "当前用户无 Docker 权限（不在 docker 组）"
+    ui_info "请改用 root 运行本脚本：sudo -i 后重新执行"
+    ui_info "或将当前用户加入 docker 组后重新登录：sudo usermod -aG docker \$USER"
+    exit 1
+  fi
+  return 0
+}
+
+install_docker() {
+  if docker_is_ready; then
+    ensure_docker_socket_access
+    ui_success "Docker 和 Docker Compose 已就绪"
+    return 0
+  fi
+
+  ui_info "正在安装 Docker..."
+  if ! command -v apt-get >/dev/null 2>&1; then
+    ui_error "仅支持 apt 包管理系统（Ubuntu/Debian），请手动安装 Docker"
+    exit 1
+  fi
+
+  local tmp_script
+  tmp_script=$(mktemp)
+  # 触发后自我清除：RETURN trap 不清除会在函数返回后残留为全局 trap
+  trap 'rm -f "$tmp_script"; trap - RETURN' RETURN
+  if curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 -o "$tmp_script" https://get.docker.com; then
+    sh "$tmp_script" || true
+  fi
+
+  if ! docker_is_ready; then
+    ui_warn "官方源安装受阻，尝试阿里云镜像..."
+    local codename
+    codename=$(. /etc/os-release && echo "$VERSION_CODENAME" 2>/dev/null)
+    if [[ -n "$codename" ]]; then
+      run_as_root apt-get update -y || true
+      run_as_root apt-get install -y ca-certificates curl gnupg || true
+      run_as_root install -m 0755 -d /etc/apt/keyrings || true
+      curl -fsSL --retry 2 --connect-timeout 10 --max-time 30 "https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg" \
+        | run_as_root gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://mirrors.aliyun.com/docker-ce/linux/ubuntu ${codename} stable" \
+        | run_as_root tee /etc/apt/sources.list.d/docker.list >/dev/null || true
+      run_as_root apt-get update -y || true
+      run_as_root apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
+    fi
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if ! getent group docker >/dev/null 2>&1; then
+      run_as_root groupadd docker || true
+    fi
+    run_as_root systemctl enable docker.socket >/dev/null 2>&1 || true
+    run_as_root systemctl start docker.socket >/dev/null 2>&1 || true
+    run_as_root systemctl enable docker.service >/dev/null 2>&1 || true
+    run_as_root systemctl start docker.service >/dev/null 2>&1 || true
+  fi
+
+  local i
+  for i in $(seq 1 10); do
+    docker_is_ready && break
+    sleep 2
+  done
+
+  if ! docker_is_ready; then
+    ui_error "Docker 安装后验证失败，请手动安装后重试"
+    exit 1
+  fi
+  ensure_docker_socket_access
+
+  # Docker 拉取镜像可用性校验：用 docker pull alpine:3.20 实测
+  # 如果失败，依次尝试：阿里云镜像加速器 → 从 shell 环境继承代理到 Docker daemon
+  local docker_pull_ok=false
+  if timeout 30 docker pull alpine:3.20 >/dev/null 2>&1; then
+    docker_pull_ok=true
+  fi
+
+  if ! $docker_pull_ok; then
+    ui_info "Docker Hub 拉取失败，尝试配置国内镜像加速器..."
+    local daemon_file="/etc/docker/daemon.json"
+    # 公共可匿名使用的 Docker Hub 镜像（DaoCloud + 1Panel），无需注册账号
+    local mirror_config='{"registry-mirrors":["https://docker.m.daocloud.io","https://docker.1panel.live"]}'
+    if [[ -f "$daemon_file" ]] && grep -q registry-mirrors "$daemon_file" 2>/dev/null; then
+      ui_info "镜像加速器已存在"
+    else
+      run_as_root mkdir -p /etc/docker
+      # 保存修改前的既有配置，加速器无效时用于还原，避免误删用户配置
+      local orig_daemon=""
+      if [[ -f "$daemon_file" ]]; then
+        orig_daemon=$(mktemp)
+        run_as_root cat "$daemon_file" > "$orig_daemon" 2>/dev/null || true
+      fi
+      local config_written=false
+      if command -v python3 >/dev/null 2>&1; then
+        # 有 python3 时合并 JSON，保留用户已有的其他 daemon.json 配置（参照 deploy/deploy.sh）
+        if run_as_root python3 - "$daemon_file" <<'PY_EOF'; then
+import json, sys
+path = sys.argv[1]
+existing = {}
+try:
+    with open(path) as f:
+        existing = json.load(f)
+except Exception:
+    existing = {}
+existing["registry-mirrors"] = [
+    "https://docker.m.daocloud.io",
+    "https://docker.1panel.live",
+]
+with open(path, "w") as f:
+    json.dump(existing, f, indent=2, ensure_ascii=False)
+PY_EOF
+          config_written=true
+        fi
+      else
+        # 无 python3 无法合并：既有 daemon.json 先备份再覆盖
+        if [[ -n "$orig_daemon" ]]; then
+          local bak="${daemon_file}.bak-$(date +%Y%m%d%H%M%S)"
+          if run_as_root cp -f "$daemon_file" "$bak" 2>/dev/null; then
+            ui_warn "未找到 python3，无法合并配置：原 daemon.json 已备份为 $bak 后覆盖"
+          fi
+        fi
+        if echo "$mirror_config" | run_as_root tee "$daemon_file" >/dev/null 2>&1; then
+          config_written=true
+        fi
+      fi
+      if $config_written; then
+        run_as_root systemctl restart docker || true
+        local j
+        for j in $(seq 1 12); do
+          if docker info >/dev/null 2>&1; then break; fi
+          sleep 2
+        done
+        if timeout 30 docker pull alpine:3.20 >/dev/null 2>&1; then
+          docker_pull_ok=true
+          ui_success "镜像加速器已生效"
+        else
+          # 加速器无效则还原（无既有配置时移除），避免残留拖慢后续走代理的拉取
+          if [[ -n "$orig_daemon" ]]; then
+            run_as_root cp -f "$orig_daemon" "$daemon_file" 2>/dev/null || true
+          else
+            run_as_root rm -f "$daemon_file"
+          fi
+          run_as_root systemctl restart docker || true
+          for j in $(seq 1 12); do
+            if docker info >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+        fi
+      fi
+      [[ -n "$orig_daemon" ]] && rm -f "$orig_daemon"
+    fi
+  fi
+
+  if ! $docker_pull_ok; then
+    ui_info "镜像加速器无效，尝试将 shell 代理配置到 Docker daemon..."
+    local proxy_src=""
+    if [[ -n "${http_proxy:-}" ]]; then
+      proxy_src="$http_proxy"
+    elif [[ -n "${https_proxy:-}" ]]; then
+      proxy_src="$https_proxy"
+    fi
+    if [[ -n "$proxy_src" ]]; then
+      local proxy_conf="/etc/systemd/system/docker.service.d/proxy.conf"
+      run_as_root mkdir -p "$(dirname "$proxy_conf")"
+      if run_as_root tee "$proxy_conf" >/dev/null <<EOF
+[Service]
+Environment="HTTP_PROXY=${proxy_src}"
+Environment="HTTPS_PROXY=${proxy_src}"
+Environment="NO_PROXY=${no_proxy:-localhost,127.0.0.1,::1}"
+EOF
+      then
+        run_as_root systemctl daemon-reload
+        run_as_root systemctl restart docker || true
+        local j
+        for j in $(seq 1 12); do
+          if docker info >/dev/null 2>&1; then break; fi
+          sleep 2
+        done
+        if timeout 30 docker pull alpine:3.20 >/dev/null 2>&1; then
+          docker_pull_ok=true
+          ui_success "Docker daemon 代理已生效"
+        fi
+      fi
+    fi
+  fi
+
+  if ! $docker_pull_ok; then
+    ui_error "Docker 无法拉取镜像，请检查网络环境后重试"
+    ui_info "如果使用了代理，请确保 Docker daemon 能通过代理访问 Docker Hub"
+    exit 1
+  fi
+  ui_success "Docker 安装完成"
+}
+
+clone_repo() {
+  if [[ -d "$PATHMEMOS_DIR/.git" ]]; then
+    ui_info "目录已存在，尝试更新..."
+    if ! git -C "$PATHMEMOS_DIR" pull origin "$PATHMEMOS_BRANCH"; then
+      ui_warn "更新代码失败，当前目录 $PATHMEMOS_DIR 已保留（含 .env、uploads、backups）"
+      ui_info "请检查网络或 origin $PATHMEMOS_BRANCH 是否可访问后重新运行本脚本"
+      exit 1
+    else
+      ui_success "代码已就绪"
+      return 0
+    fi
+  fi
+
+  local parent
+  parent=$(dirname "$PATHMEMOS_DIR")
+  if [[ ! -d "$parent" ]]; then
+    run_as_root mkdir -p "$parent"
+  fi
+
+  ui_info "下载爬爬记忆助手【PathMemos】（可能需几分钟，卡住请检查网络）..."
+  # 180 秒超时，避免 GitHub 被墙或网络差时无限挂起
+  if ! timeout 180 git clone -b "$PATHMEMOS_BRANCH" --depth 1 "$PATHMEMOS_REPO" "$PATHMEMOS_DIR"; then
+    # 非 root 用户首次创建目录可能权限不足，尝试 sudo
+    ui_info "可能因目录权限不足，尝试以 root 权限重试..."
+    run_as_root mkdir -p "$PATHMEMOS_DIR"
+    if ! timeout 180 run_as_root git clone -b "$PATHMEMOS_BRANCH" --depth 1 "$PATHMEMOS_REPO" "$PATHMEMOS_DIR"; then
+      ui_error "代码下载失败"
+      ui_info "请检查服务器能否访问 GitHub，或尝试:"
+      ui_info "  git clone -b open https://github.com/Papafeiji/pathmemos.git ${PATHMEMOS_DIR}"
+      exit 1
+    fi
+    run_as_root chown -R "$(whoami)" "$PATHMEMOS_DIR" 2>/dev/null || true
+  fi
+  ui_success "代码已就绪（浅克隆，执行 git fetch --unshallow 可拉取完整历史以启用回滚）"
+}
+
+preflight_inputs() {
+	_gum_style_box "请提前准备好：1. 大模型 API Key    2. 腾讯地图 API Key"
+
+	if ! _gum_confirm "是否已准备好以上项？"; then
+		ui_info "请准备好后重新运行本脚本"
+		exit 0
+	fi
+}
+
+cleanup_data_volumes() {
+	# 按 compose label 查找本项目的 postgres 数据卷，不硬编码卷名（compose 项目名 = 安装目录 basename）
+	local project_name old_pg_vol="" vol
+	project_name=$(basename "$PATHMEMOS_DIR")
+	for vol in $(docker volume ls -q --filter label=com.docker.compose.volume=postgres_data 2>/dev/null); do
+		if [[ "$(docker volume inspect "$vol" --format '{{ index .Labels "com.docker.compose.project" }}' 2>/dev/null)" == "$project_name" ]]; then
+			old_pg_vol="$vol"
+			break
+		fi
+	done
+	if [[ -n "$old_pg_vol" ]]; then
+		ui_warn "检测到旧的数据卷，新密码可能与之不匹配"
+		ui_info "正在清理旧数据卷（PostgreSQL 与 Redis 数据会丢失，如要保留请提前备份）..."
+		cd "$PATHMEMOS_DIR"
+		docker compose down -v >/dev/null 2>&1 || true
+		docker volume rm "$old_pg_vol" >/dev/null 2>&1 || true
+		ui_success "旧数据卷已清理"
+	fi
+}
+run_init() {
+	cd "$PATHMEMOS_DIR"
+	local should_init=0
+	if [[ -f .env ]]; then
+		if ! _gum_confirm "检测到已有配置，重新配置将删除 PostgreSQL/Redis 数据卷（保留 uploads、backups 目录），是否继续？" --default no; then
+			ui_info "使用现有配置继续"
+			return 0
+		fi
+		should_init=1
+	else
+		should_init=1
+	fi
+
+	if [[ "$should_init" -eq 1 ]]; then
+		cleanup_data_volumes
+		rm -f .env
+		./scripts/init.sh
+	fi
+}
+
+cf_api() {
+  local method="$1"
+  local path="$2"
+  local data="${3:-}"
+  local args=(
+    -sS --retry 3 --retry-delay 1
+    --connect-timeout 10 --max-time 30
+    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+    -H "Content-Type: application/json"
+    -X "$method"
+  )
+  if [[ -n "$data" ]]; then
+    args+=(-d "$data")
+  fi
+  # 不启用 -f，HTTP 错误码也会返回 body，便于统一解析 .success
+  curl "${args[@]}" "https://api.cloudflare.com/client/v4$path" || echo '{"success":false,"errors":[{"message":"请求失败，请检查网络或 Token"}]}'
+}
+
+select_cf_zone() {
+	local hostname="$1"
+	# 注意：本函数被 $() 捕获 stdout，所有 UI 输出必须走 stderr，只有 zone_id 走 stdout
+	ui_info "查找 Cloudflare Zone..." >&2
+	local zones_resp zones zone_id=""
+	zones_resp=$(cf_api GET "/zones?per_page=50")
+	# Token 无 Zone 读取权限时 .result 为 null，直接解析会无声失败
+	if ! echo "$zones_resp" | jq -e '.success == true and .result != null' >/dev/null 2>&1; then
+		ui_error "获取 Cloudflare Zone 列表失败" >&2
+		ui_info "请确认 API Token 具备 Zone:Read 权限，且账号下已添加对应域名" >&2
+		exit 1
+	fi
+	zones=$(echo "$zones_resp" | jq -r '.result[] | "\(.name) \(.id)"')
+	local zone_name zone_candidate
+	while IFS=' ' read -r zone_name zone_candidate; do
+		[[ -z "$zone_name" ]] && continue
+		if [[ "$hostname" == "$zone_name" || "$hostname" == *".${zone_name}" ]]; then
+			zone_id="$zone_candidate"
+			break
+		fi
+	done <<< "$zones"
+	if [[ -z "$zone_id" ]]; then
+		ui_error "未找到 ${hostname} 对应的 Cloudflare Zone" >&2
+		ui_info "请确认该域名已添加到 Cloudflare 并使用 Cloudflare 名称服务器" >&2
+		exit 1
+	fi
+	echo "$zone_id"
+}
+
+setup_cloudflare_tunnel_custom_domain() {
+	_gum_style_box "请提前准备好：1. Cloudflare API Token\n并配置好以下权限： Account:Read   Cloudflare Tunnel:Edit   Zone:DNS:Edit"
+
+	CLOUDFLARE_API_TOKEN=$(_gum_input --placeholder "Cloudflare API Token" --password)
+	if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
+		ui_error "API Token 不能为空"
+		exit 1
+	fi
+
+	ui_info "验证 API Token..."
+	local verify_resp
+	verify_resp=$(cf_api GET "/user/tokens/verify")
+	if ! echo "$verify_resp" | jq -e '.success' >/dev/null 2>&1; then
+		ui_error "API Token 验证失败"
+		exit 1
+	fi
+	ui_success "API Token 验证通过"
+
+	ui_info "获取 Cloudflare 账号..."
+	local accounts_resp account_count account_id account_name
+	accounts_resp=$(cf_api GET "/accounts?per_page=50")
+	account_count=$(echo "$accounts_resp" | jq '.result | length')
+	if [[ "$account_count" -eq 0 ]]; then
+		ui_error "该 Token 无法访问任何 Cloudflare 账号"
+		exit 1
+	elif [[ "$account_count" -eq 1 ]]; then
+		account_id=$(echo "$accounts_resp" | jq -r '.result[0].id')
+		account_name=$(echo "$accounts_resp" | jq -r '.result[0].name')
+	else
+		local opts=() ids=() i
+		for i in $(seq 0 $((account_count - 1))); do
+			ids+=("$(echo "$accounts_resp" | jq -r ".result[$i].id")")
+			opts+=("$(echo "$accounts_resp" | jq -r ".result[$i].name") (${ids[$i]})")
+		done
+		local chosen
+		chosen=$(_gum_choose --header "选择 Cloudflare 账号" "${opts[@]}")
+		for i in "${!opts[@]}"; do
+			if [[ "${opts[$i]}" == "$chosen" ]]; then
+				account_id="${ids[$i]}"
+				account_name=$(echo "$accounts_resp" | jq -r ".result[$i].name")
+				break
+			fi
+		done
+	fi
+	ui_success "使用账号: $account_name"
+
+	# 先收集并校验域名/Zone，全部通过后再创建 Tunnel，
+	# 避免中途退出留下孤儿 Tunnel（tunnel 名含时间戳，重跑会累积）
+	local hostname
+	hostname=$(_gum_input --placeholder "自定义域名，例如 api.example.com")
+	if [[ -z "$hostname" ]]; then
+		ui_error "域名不能为空"
+		exit 1
+	fi
+
+	local zone_id
+	zone_id=$(select_cf_zone "$hostname")
+	ui_success "Zone ID: $zone_id"
+
+	ui_info "创建 Cloudflare Tunnel..."
+	local tunnel_name tunnel_resp tunnel_id tunnel_token
+	tunnel_name="pathmemos-open-$(date +%s)"
+	tunnel_resp=$(cf_api POST "/accounts/$account_id/cfd_tunnel" "{\"name\":\"$tunnel_name\",\"config_src\":\"cloudflare\"}")
+	if ! echo "$tunnel_resp" | jq -e '.success' >/dev/null 2>&1; then
+		local err_msg
+		err_msg=$(echo "$tunnel_resp" | jq -r '.errors[0].message // "未知错误"')
+		ui_error "创建 Tunnel 失败: $err_msg"
+		exit 1
+	fi
+	tunnel_id=$(echo "$tunnel_resp" | jq -r '.result.id')
+	tunnel_token=$(echo "$tunnel_resp" | jq -r '.result.token')
+	ui_success "Tunnel 创建成功"
+
+	ui_info "配置 Tunnel ingress -> http://nginx:80 ..."
+	local config_resp
+	config_resp=$(cf_api PUT "/accounts/$account_id/cfd_tunnel/$tunnel_id/configurations" "{\"config\":{\"ingress\":[{\"hostname\":\"${hostname}\",\"service\":\"http://nginx:80\",\"originRequest\":{}},{\"service\":\"http_status:404\"}]}}")
+	if ! echo "$config_resp" | jq -e '.success' >/dev/null 2>&1; then
+		local err_msg
+		err_msg=$(echo "$config_resp" | jq -r '.errors[0].message // "未知错误"')
+		ui_warn "配置 Tunnel ingress 失败: $err_msg"
+	else
+		ui_success "Tunnel ingress 配置完成"
+	fi
+
+	ui_info "添加 DNS CNAME 记录..."
+	local dns_resp
+	dns_resp=$(cf_api POST "/zones/$zone_id/dns_records" "{\"type\":\"CNAME\",\"name\":\"${hostname}\",\"content\":\"${tunnel_id}.cfargotunnel.com\",\"proxied\":true,\"comment\":\"PathMemos Open\"}")
+	if ! echo "$dns_resp" | jq -e '.success' >/dev/null 2>&1; then
+		local err_msg
+		err_msg=$(echo "$dns_resp" | jq -r '.errors[0].message // "未知错误"')
+		ui_error "添加 DNS 记录失败: $err_msg"
+		ui_info "请手动添加 CNAME: ${hostname} -> ${tunnel_id}.cfargotunnel.com"
+		exit 1
+	fi
+	ui_success "DNS 记录添加完成"
+
+	local tunnel_domain="https://${hostname}"
+
+	if grep -q "^CLOUDFLARE_TUNNEL_TOKEN=" .env; then
+		sed -i "s|^CLOUDFLARE_TUNNEL_TOKEN=.*|CLOUDFLARE_TUNNEL_TOKEN=${tunnel_token}|" .env
+	else
+		echo "CLOUDFLARE_TUNNEL_TOKEN=${tunnel_token}" >> .env
+	fi
+	if grep -q "^API_HOST=" .env; then
+		sed -i "s|^API_HOST=.*|API_HOST=${tunnel_domain}|" .env
+	else
+		echo "API_HOST=${tunnel_domain}" >> .env
+	fi
+
+	ui_success "公网地址: $tunnel_domain"
+}
+
+setup_cloudflare_tunnel_quick() {
+	_gum_style_box "临时测试：不需要注册 Cloudflare 账号，直接完全开源化部署（注意此方式在重启服务器后失效，建议跑完测试之后切换到注册 Cloudflare API Token方式）"
+
+	if grep -q "^CLOUDFLARE_TUNNEL_TOKEN=" .env; then
+		sed -i "s|^CLOUDFLARE_TUNNEL_TOKEN=.*|CLOUDFLARE_TUNNEL_TOKEN=|" .env
+	fi
+
+	if grep -q "^API_HOST=" .env; then
+		sed -i "s|^API_HOST=.*|API_HOST=|" .env
+	else
+		echo "API_HOST=" >> .env
+	fi
+
+	ui_info "已选择临时测试方案，将在启动容器后自动获取公网地址"
+}
+setup_cloudflare_tunnel() {
+	cd "$PATHMEMOS_DIR"
+	source .env
+
+	if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" && -n "${API_HOST:-}" && "$API_HOST" != "http://localhost:8080" && "$API_HOST" != "http://localhost" ]]; then
+		if ! _gum_confirm "检测到已有 Cloudflare Tunnel 配置，是否重新创建？" --default no; then
+			ui_info "跳过 Tunnel 创建，使用现有配置"
+			return 0
+		fi
+	fi
+
+	ui_section "Cloudflare Tunnel 自动配置"
+
+	local mode
+	mode=$(_gum_choose --header "选择公网入口方式" "正式部署（需要注册 Cloudflare 账号，并配置 API Token，可长期稳定使用）" "临时测试（不需要注册 Cloudflare 账号，直接完全开源化部署测试，但在重启服务器后失效）")
+
+	if [[ "$mode" == "正式部署"* ]]; then
+		setup_cloudflare_tunnel_custom_domain
+	else
+		setup_cloudflare_tunnel_quick
+	fi
+}
+start_cloudflared() {
+	cd "$PATHMEMOS_DIR"
+	source .env
+
+	ui_section "启动公网入口"
+
+	if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
+		# 切换到正式部署：停掉临时测试的 Quick Tunnel 服务，避免双隧道并存
+		run_as_root systemctl disable --now pathmemos-quicktunnel.service 2>/dev/null || true
+		ui_info "启动 Cloudflare Tunnel 容器（自定义域名）..."
+		if ! docker compose --profile tunnel up -d cloudflared; then
+			ui_error "Tunnel 容器启动失败"
+			ui_info "请检查: docker compose logs -f cloudflared"
+			exit 1
+		fi
+		ui_success "Tunnel 容器已启动"
+	else
+		# 切换到临时测试：删除 compose 管理的 cloudflared 容器，避免双隧道并存
+		docker compose --profile tunnel rm -sf cloudflared >/dev/null 2>&1 || true
+		ui_info "启动 Cloudflare Quick Tunnel..."
+		# 清理旧的运行方式残留：docker 容器（历史版本）与旧二进制进程，避免多实例并存
+		docker rm -f pathmemos-cloudflared >/dev/null 2>&1 || true
+		run_as_root systemctl stop pathmemos-quicktunnel 2>/dev/null || true
+		run_as_root pkill -f "cloudflared-quick" 2>/dev/null || true
+		# Quick Tunnel：不从 Docker Hub 拉镜像（国内常超时），直接下载二进制运行
+		local cloudflared_bin="/usr/local/bin/cloudflared-quick"
+		if ! command -v "$cloudflared_bin" >/dev/null 2>&1; then
+			ui_info "下载 cloudflared 二进制..."
+			local arch
+			arch=$(uname -m)
+			case "$arch" in
+				x86_64) arch="amd64" ;;
+				aarch64) arch="arm64" ;;
+				*) arch="amd64" ;;
+			esac
+			local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
+			if ! run_as_root timeout 60 curl -fsSL -o "$cloudflared_bin" "$url"; then
+				ui_error "下载 cloudflared 二进制失败"
+				ui_info "请手动从 GitHub Releases 下载:"
+				ui_info "  ${url}"
+				exit 1
+			fi
+			run_as_root chmod +x "$cloudflared_bin"
+		fi
+		# 用 systemd 守护运行：崩溃自动重启、开机自启（trycloudflare 地址重启后会变化，
+		# 需重跑本脚本或手动更新 .env 中的 API_HOST）
+		run_as_root tee /etc/systemd/system/pathmemos-quicktunnel.service >/dev/null <<EOF
+[Unit]
+Description=PathMemos Cloudflare Quick Tunnel
+After=network-online.target
+
+[Service]
+ExecStart=${cloudflared_bin} tunnel --url http://localhost:80 --no-autoupdate
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/pathmemos-quicktunnel.log
+StandardError=append:/var/log/pathmemos-quicktunnel.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		run_as_root rm -f /var/log/pathmemos-quicktunnel.log
+		run_as_root systemctl daemon-reload
+		if ! run_as_root systemctl enable --now pathmemos-quicktunnel >/dev/null 2>&1; then
+			ui_error "Quick Tunnel 服务启动失败"
+			ui_info "请检查: journalctl -u pathmemos-quicktunnel"
+			exit 1
+		fi
+		ui_info "等待获取公网地址..."
+		local api_host=""
+		local i
+		for i in $(seq 1 30); do
+			api_host=$(run_as_root grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /var/log/pathmemos-quicktunnel.log 2>/dev/null | head -1 || true)
+			if [[ -n "$api_host" ]]; then
+				break
+			fi
+			sleep 2
+		done
+		if [[ -z "$api_host" ]]; then
+			run_as_root systemctl stop pathmemos-quicktunnel 2>/dev/null || true
+			ui_error "未能获取 Quick Tunnel 公网地址"
+			ui_info "请检查: cat /var/log/pathmemos-quicktunnel.log"
+			exit 1
+		fi
+		ui_success "Quick Tunnel 已启动: $api_host"
+		if grep -q "^API_HOST=" .env; then
+			sed -i "s|^API_HOST=.*|API_HOST=${api_host}|" .env
+		else
+			echo "API_HOST=${api_host}" >> .env
+		fi
+		ui_success "公网地址: $api_host"
+	fi
+
+	ui_info "重新创建应用容器以应用新 API_HOST..."
+	if ! docker compose up -d --build app nginx backup; then
+		ui_error "应用重启失败"
+		ui_info "请检查: docker compose logs -f app"
+		exit 1
+	fi
+	ui_success "应用已重新创建"
+}
+
+health_check() {
+	cd "$PATHMEMOS_DIR"
+	source .env
+
+	ui_section "健康检查"
+	ui_info "等待应用就绪..."
+	local i
+	for i in $(seq 1 60); do
+		if docker compose ps app | grep -q "(healthy)"; then
+			break
+		fi
+		sleep 2
+	done
+	if ! docker compose ps app | grep -q "(healthy)"; then
+		ui_error "应用未在 120 秒内就绪"
+		ui_info "最近 50 行应用日志:"
+		docker compose logs --tail 50 app || true
+		ui_info "请检查: docker compose logs -f app"
+		exit 1
+	fi
+	ui_success "应用已就绪"
+
+	local api_host
+	api_host=$(grep "^API_HOST=" .env | cut -d= -f2-)
+
+	if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
+		ui_info "等待 Tunnel 容器启动..."
+		for i in $(seq 1 30); do
+			if docker compose ps cloudflared | grep -q "Up"; then
+				break
+			fi
+			sleep 2
+		done
+		if ! docker compose ps cloudflared | grep -q "Up"; then
+			ui_error "Tunnel 容器未在 60 秒内启动"
+			ui_info "请检查: docker compose logs -f cloudflared"
+			exit 1
+		fi
+		ui_success "Tunnel 容器已启动"
+
+		if [[ -n "$api_host" && "$api_host" != http://localhost:* ]]; then
+			ui_info "探测公网地址: ${api_host}/health ..."
+			if curl -fsSL --retry 3 --retry-delay 2 "${api_host}/health" >/dev/null 2>&1; then
+				ui_success "公网地址可访问: ${api_host}"
+			else
+				ui_warn "公网地址暂不可访问"
+				ui_info "可能原因：DNS 未生效、本地网络拦截了该域名，或域名未解析到 Cloudflare"
+			fi
+		fi
+	elif run_as_root systemctl is-active pathmemos-quicktunnel >/dev/null 2>&1; then
+		ui_info "探测 Quick Tunnel 公网地址: ${api_host}/health ..."
+		if curl -fsSL --retry 3 --retry-delay 2 "${api_host}/health" >/dev/null 2>&1; then
+			ui_success "Quick Tunnel 可访问: ${api_host}"
+		else
+			ui_warn "Quick Tunnel 暂不可访问"
+			ui_info "可能原因：本地 DNS 拦截了 trycloudflare.com，可尝试换网络或使用手机流量测试"
+		fi
+	fi
+
+	ui_success "本地服务已启动: http://localhost"
+}
+
+show_summary() {
+  cd "$PATHMEMOS_DIR"
+  source .env
+
+  local api_host log_cmd
+  api_host=$(grep "^API_HOST=" .env | cut -d= -f2-)
+  if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
+    log_cmd="docker compose logs -f cloudflared"
+  else
+    log_cmd="tail -f /var/log/pathmemos-quicktunnel.log"
+  fi
+
+  # 摘要固化到磁盘：SSH 断开或滚屏丢失后仍可随时找回
+  {
+    echo "后端地址: ${api_host}"
+    echo "API Key: ${OPEN_API_KEY}"
+    echo "生成时间: $(date '+%F %T')"
+  } > "${PATHMEMOS_DIR}/install-info.txt" 2>/dev/null || true
+  chmod 600 "${PATHMEMOS_DIR}/install-info.txt" 2>/dev/null || true
+
+  # 用普通输出而非 gum 框：复制时不会带边框字符，且不依赖 /dev/tty
+  ui_section "安装完成 🎉"
+  ui_kv "后端地址" "${api_host}"
+  ui_kv "API Key" "${OPEN_API_KEY}"
+  ui_info "在小程序「个人中心 → 设置 → 后端配置」填写以上两项即可切换到开源版，管理自身全部数据"
+  ui_info "以上信息已保存至 ${PATHMEMOS_DIR}/install-info.txt，可随时查看"
+  ui_info "查看隧道日志: ${log_cmd}"
+}
+
+# ---------- 主流程 ----------
+main() {
+  # 防止在已被删除的目录中运行脚本（常见于 rm -rf pathmemos 后）
+  if ! pwd >/dev/null 2>&1; then
+    ui_warn "当前工作目录不存在，切换到 /tmp"
+    cd /tmp || cd /
+  fi
+
+  ui_section "检查环境"
+  require_root
+  check_prerequisites
+  bootstrap_gum || true
+  install_git
+  ensure_jq
+  install_docker
+
+  ui_section "下载代码"
+  clone_repo
+
+  preflight_inputs
+  run_init
+  setup_cloudflare_tunnel
+  start_cloudflared
+  health_check
+  show_summary
+}
+main "$@"

@@ -1,0 +1,66 @@
+
+<view class="time-mask {{visible ? 'time-mask--show' : ''}}" bindtap="onMaskTap">
+  <view class="time-sheet {{visible ? 'time-sheet--show' : ''}}" catchtap="onSheetTap">
+    <view class="time-header">
+      <view class="time-title">{{_i18n['timePicker.title']}}</view>
+      <view class="time-close" bindtap="onClose">✕</view>
+    </view>
+
+    <view class="time-display" bindtap="onEditTime">
+      <text class="time-display-value">{{displayTime}}</text>
+      <view class="time-display-hint">{{_i18n['timePicker.editHint']}}</view>
+    </view>
+
+    <scroll-view class="time-scroll" scroll-y enhanced show-scrollbar="{{false}}">
+      <view class="time-grid">
+        <view
+          wx:for="{{blocks}}"
+          wx:key="time"
+          class="time-block {{item.hour === selectedHour ? 'time-block--active' : ''}}"
+          data-time="{{item.time}}"
+          bindtap="onSelectBlock"
+        >
+          {{item.label}}
+        </view>
+      </view>
+    </scroll-view>
+
+    <view class="time-footer">
+      <view class="time-btn time-btn--cancel" bindtap="onClose">{{_i18n['common.cancel']}}</view>
+      <view class="time-btn time-btn--confirm" bindtap="onConfirm">{{_i18n['common.confirm']}}</view>
+    </view>
+  </view>
+</view>
+
+<view wx:if="{{editVisible}}" class="time-edit-mask" bindtap="onEditMaskTap">
+  <view class="time-edit-sheet" catchtap="onEditSheetTap">
+    <view class="time-edit-title">{{_i18n['timePicker.editTitle']}}</view>
+    <view class="time-edit-inputs">
+      <input
+        class="time-edit-input"
+        type="number"
+        maxlength="2"
+        focus="{{false}}"
+        value="{{editHour}}"
+        data-field="hour"
+        bindinput="onEditInput"
+        bindfocus="onEditFocus"
+      />
+      <text class="time-edit-colon">:</text>
+      <input
+        class="time-edit-input"
+        type="number"
+        maxlength="2"
+        focus="{{false}}"
+        value="{{editMinute}}"
+        data-field="minute"
+        bindinput="onEditInput"
+        bindfocus="onEditFocus"
+      />
+    </view>
+    <view class="time-edit-footer">
+      <view class="time-btn time-btn--cancel" bindtap="onEditCancel">{{_i18n['common.cancel']}}</view>
+      <view class="time-btn time-btn--confirm" bindtap="onEditConfirm">{{_i18n['common.confirm']}}</view>
+    </view>
+  </view>
+</view>

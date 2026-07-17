@@ -1,0 +1,7 @@
+{
+  "styleIsolation": "apply-shared",
+  "component": true,
+  "usingComponents": {
+    "ConfirmDialog": "/components/ConfirmDialog/ConfirmDialog"
+  }
+}

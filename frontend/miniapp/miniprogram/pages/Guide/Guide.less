@@ -1,0 +1,56 @@
+/* pages/Guide/Guide.wxss */
+.BasePage {
+  height: 100vh;
+  width: 100vw;
+  background-color: var(--ppfj-bg);
+  color: var(--ppfj-text);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.guide {
+  margin: 0 auto;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+  box-sizing: border-box;
+  .guide-image {
+    height: 100%;
+    border-radius: 48rpx;
+  }
+}
+
+.btns {
+  position: absolute;
+  bottom: 48rpx;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  > view {
+    width: 240rpx;
+    height: 96rpx;
+    border-radius: 48rpx;
+    background-color: #b58c5f;
+    color: #fcfcfd;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 24rpx;
+  }
+  &.add {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text {
+      margin-top: 28rpx;
+      color: var(--ppfj-text-secondary);
+      font-size: 28rpx;
+    }
+  }
+}

@@ -1,0 +1,172 @@
+:host {
+  --coffee-dark: #543116;
+  --coffee-medium: #7D5A3D;
+  --coffee-light: #A67C52;
+  --cream: #FFECC5;
+}
+
+.NoteItem {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0 64rpx;
+  margin-bottom: 28rpx;
+  position: relative;
+
+  .container {
+    border-radius: 36rpx;
+    overflow: hidden;
+    background-color: var(--ppfj-card-bg);
+    box-shadow: 0 16rpx 48rpx rgba(84, 49, 22, 0.12);
+    z-index: 2;
+    position: relative;
+    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+    &.isTouchLeft {
+      transform: translateX(-170rpx);
+    }
+
+    .banner-wrap {
+      position: relative;
+      width: 100%;
+      height: 400rpx;
+
+      .banner {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      .banner-mask {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 160rpx;
+        background: linear-gradient(to bottom, rgba(0, 0, 0, 0.35), transparent);
+        border-top-left-radius: 36rpx;
+        border-top-right-radius: 36rpx;
+        pointer-events: none;
+      }
+
+      .date-overlay {
+        position: absolute;
+        left: 28rpx;
+        top: 28rpx;
+        z-index: 2;
+        color: #fff;
+
+        .dayView {
+          display: flex;
+          align-items: flex-end;
+
+          .day {
+            font-family: MFZhiShangNoncommercial;
+            font-size: 54rpx;
+            font-weight: 600;
+            line-height: 50rpx;
+            margin-right: 14rpx;
+          }
+          .month {
+            font-family: Poppins;
+            font-weight: 600;
+            font-size: 26rpx;
+          }
+        }
+        .weekDay {
+          font-size: 24rpx;
+          line-height: 36rpx;
+          font-weight: 600;
+          margin-top: 6rpx;
+          color: rgba(255, 255, 255, 0.9);
+        }
+      }
+    }
+
+    .main {
+      padding: 32rpx 30rpx 36rpx;
+      background-color: var(--ppfj-card-bg);
+
+      .address-list {
+        .address-item {
+          position: relative;
+          display: flex;
+          align-items: flex-start;
+          padding: 18rpx 20rpx;
+          border-radius: 20rpx;
+          background-color: var(--ppfj-input-bg);
+
+          & + .address-item {
+            margin-top: 16rpx;
+          }
+
+          .item-line {
+            position: absolute;
+            left: 0;
+            top: 18rpx;
+            bottom: 18rpx;
+            width: 6rpx;
+            border-radius: 0 6rpx 6rpx 0;
+            background-color: var(--coffee-medium);
+          }
+
+          .avatar {
+            flex-shrink: 0;
+            width: 44rpx;
+            height: 44rpx;
+            border-radius: 50%;
+            margin-right: 16rpx;
+            display: block;
+            border: 2rpx solid var(--ppfj-card-bg);
+            box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.08);
+          }
+
+          .address {
+            flex: 1;
+            min-width: 0;
+            font-size: 28rpx;
+            color: var(--ppfj-text);
+            line-height: 44rpx;
+            font-weight: 500;
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+        }
+      }
+
+      .empty-tip {
+        padding: 24rpx 0;
+        text-align: center;
+        font-size: 26rpx;
+        color: var(--ppfj-text-secondary);
+      }
+    }
+  }
+
+.del-container {
+    width: 120rpx;
+    position: absolute;
+    height: 120rpx;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    right: 70rpx;
+    top: 50%;
+    margin-top: -60rpx;
+    z-index: 1;
+    opacity: 0;
+    transition: opacity 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+    &.isTouchLeft {
+      opacity: 1;
+    }
+
+    .del-icon {
+      width: 80rpx;
+      height: 80rpx;
+    }
+  }
+}

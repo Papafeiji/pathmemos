@@ -1,0 +1,1 @@
+ALTER TABLE api_keys ALTER COLUMN api_key DROP NOT NULL;

@@ -1,0 +1,46 @@
+<view class="BasePage" data-theme="{{theme}}">
+  <navigation-bar
+    title="{{_i18n['brand.name'] || ''}}"
+    back="{{false}}"
+    homeButton
+    bind:home="toUser"
+  >
+  </navigation-bar>
+  <view class="guide">
+    <image
+      hidden="{{step !== 0}}"
+      class="guide-image"
+      mode="heightFix"
+      src="{{images[0]}}"
+      bindtap="next"
+    />
+    <image
+      hidden="{{step !== 1}}"
+      class="guide-image"
+      mode="heightFix"
+      lazy-load
+      src="{{images[1]}}"
+    />
+    <image
+      hidden="{{step !== 2}}"
+      class="guide-image"
+      mode="heightFix"
+      lazy-load
+      src="{{images[2]}}"
+    />
+    <image
+      hidden="{{step !== 3}}"
+      class="guide-image"
+      mode="heightFix"
+      lazy-load
+      src="{{images[3]}}"
+    />
+    <view class="btns" wx:if="{{step > 0}}">
+      <view bindtap="pre">{{_i18n['guide.prev']}}</view>
+      <view bindtap="next">{{_i18n['guide.next']}}</view>
+    </view>
+  </view>
+
+
+</view>
+

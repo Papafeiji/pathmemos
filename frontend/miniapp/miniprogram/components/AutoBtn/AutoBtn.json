@@ -1,0 +1,7 @@
+{
+  "styleIsolation": "apply-shared",
+  "component": true,
+  "usingComponents": {
+    "SubscribePrompt": "/components/SubscribePrompt/SubscribePrompt"
+  }
+}

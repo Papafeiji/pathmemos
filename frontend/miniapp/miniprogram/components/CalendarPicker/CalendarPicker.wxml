@@ -1,0 +1,32 @@
+
+<view class="calendar-mask {{visible ? 'calendar-mask--show' : ''}}" bindtap="onMaskTap">
+  <view class="calendar-sheet {{visible ? 'calendar-sheet--show' : ''}}" catchtap="onSheetTap">
+    <view class="calendar-header">
+      <view class="calendar-title">{{_i18n['calendarPicker.title']}}</view>
+      <view class="calendar-close" bindtap="onClose">✕</view>
+    </view>
+    <view class="calendar-toolbar">
+      <view class="calendar-arrow" bindtap="onPrevMonth">‹</view>
+      <view class="calendar-ym">{{yearMonthText}}</view>
+      <view class="calendar-arrow" bindtap="onNextMonth">›</view>
+    </view>
+    <view class="calendar-weekdays">
+      <view wx:for="{{weekdays}}" wx:key="*this" class="calendar-weekday">{{item}}</view>
+    </view>
+    <view class="calendar-days">
+      <view
+        wx:for="{{days}}"
+        wx:key="date"
+        class="calendar-day {{item.empty ? 'calendar-day--empty' : ''}} {{item.isToday ? 'calendar-day--today' : ''}} {{item.isSelected ? 'calendar-day--selected' : ''}}"
+        data-date="{{item.date}}"
+        bindtap="onSelectDay"
+      >
+        <text class="calendar-day-text">{{item.day || ''}}</text>
+      </view>
+    </view>
+    <view class="calendar-footer">
+      <view class="calendar-btn calendar-btn--cancel" bindtap="onClose">{{_i18n['common.cancel']}}</view>
+      <view class="calendar-btn calendar-btn--confirm" bindtap="onConfirm">{{_i18n['common.confirm']}}</view>
+    </view>
+  </view>
+</view>
