@@ -35,7 +35,7 @@ INSERT INTO users (
     user_type, phone_bind_time, auto_record_enabled, session_key,
     personal_family_id, current_family_id, invited_by, created_at, updated_at
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
-RETURNING id, open_id, unionid, phone_number, avatar, avatar_file_id, nickname, user_type, phone_bind_time, auto_record_enabled, personal_family_id, current_family_id, created_at, updated_at, session_key, invited_by, abnormal_subscribe_accepted, abnormal_alert_sent_at, last_active_at, lang
+RETURNING id, open_id, unionid, phone_number, avatar, avatar_file_id, nickname, user_type, phone_bind_time, auto_record_enabled, personal_family_id, current_family_id, created_at, updated_at, session_key, invited_by, abnormal_subscribe_accepted, abnormal_alert_sent_at, last_active_at, lang, image_storage_bytes
 `
 
 type CreateUserParams struct {
@@ -94,8 +94,27 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.AbnormalAlertSentAt,
 		&i.LastActiveAt,
 		&i.Lang,
+		&i.ImageStorageBytes,
 	)
 	return i, err
+}
+
+const decrementUserImageStorage = `-- name: DecrementUserImageStorage :exec
+UPDATE users
+SET image_storage_bytes = GREATEST(image_storage_bytes - $2, 0),
+    updated_at = now()
+WHERE id = $1
+`
+
+type DecrementUserImageStorageParams struct {
+	ID                string `json:"id"`
+	ImageStorageBytes int64  `json:"imageStorageBytes"`
+}
+
+// GREATEST 保底：并发/重复扣减时计量不得为负（负值会绕过存储限额检查）。
+func (q *Queries) DecrementUserImageStorage(ctx context.Context, arg DecrementUserImageStorageParams) error {
+	_, err := q.db.Exec(ctx, decrementUserImageStorage, arg.ID, arg.ImageStorageBytes)
+	return err
 }
 
 const deleteUser = `-- name: DeleteUser :exec
@@ -357,6 +376,17 @@ func (q *Queries) GetUserByUnionID(ctx context.Context, unionid pgtype.Text) (Ge
 	return i, err
 }
 
+const getUserImageStorageUsage = `-- name: GetUserImageStorageUsage :one
+SELECT image_storage_bytes FROM users WHERE id = $1
+`
+
+func (q *Queries) GetUserImageStorageUsage(ctx context.Context, id string) (int64, error) {
+	row := q.db.QueryRow(ctx, getUserImageStorageUsage, id)
+	var image_storage_bytes int64
+	err := row.Scan(&image_storage_bytes)
+	return image_storage_bytes, err
+}
+
 const getUserSessionKeyByID = `-- name: GetUserSessionKeyByID :one
 SELECT session_key FROM users WHERE id = $1
 `
@@ -366,6 +396,29 @@ func (q *Queries) GetUserSessionKeyByID(ctx context.Context, id string) (pgtype.
 	var session_key pgtype.Text
 	err := row.Scan(&session_key)
 	return session_key, err
+}
+
+const incrementUserImageStorage = `-- name: IncrementUserImageStorage :execrows
+UPDATE users
+SET image_storage_bytes = image_storage_bytes + $2,
+    updated_at = now()
+WHERE id = $1
+  AND ($3::bigint <= 0 OR image_storage_bytes + $2 <= $3)
+`
+
+type IncrementUserImageStorageParams struct {
+	ID                string `json:"id"`
+	ImageStorageBytes int64  `json:"imageStorageBytes"`
+	StorageLimit      int64  `json:"storageLimit"`
+}
+
+// B5-12：条件原子扣减——超限时更新 0 行，由调用方识别拒绝，杜绝 check-then-act 竞态。
+func (q *Queries) IncrementUserImageStorage(ctx context.Context, arg IncrementUserImageStorageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, incrementUserImageStorage, arg.ID, arg.ImageStorageBytes, arg.StorageLimit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const markAbnormalAlertSent = `-- name: MarkAbnormalAlertSent :execrows
@@ -445,6 +498,24 @@ type UpdateUserCurrentFamilyParams struct {
 func (q *Queries) UpdateUserCurrentFamily(ctx context.Context, arg UpdateUserCurrentFamilyParams) error {
 	_, err := q.db.Exec(ctx, updateUserCurrentFamily, arg.ID, arg.CurrentFamilyID)
 	return err
+}
+
+const updateUserInvitedBy = `-- name: UpdateUserInvitedBy :execrows
+UPDATE users SET invited_by = $2, updated_at = now() WHERE id = $1 AND (invited_by IS NULL OR invited_by = '')
+`
+
+type UpdateUserInvitedByParams struct {
+	ID        string      `json:"id"`
+	InvitedBy pgtype.Text `json:"invitedBy"`
+}
+
+// 仅当尚无邀请人时写入（登录后补绑场景的幂等闸门，R4）。
+func (q *Queries) UpdateUserInvitedBy(ctx context.Context, arg UpdateUserInvitedByParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateUserInvitedBy, arg.ID, arg.InvitedBy)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateUserLang = `-- name: UpdateUserLang :exec

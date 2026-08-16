@@ -32,7 +32,7 @@ Component({
   properties: {},
 
   data: {
-    isfocus: false,
+
     bottom: 0,
     userAvatar: '',
     bottomSafeHeight: '0',
@@ -210,7 +210,7 @@ Component({
         if (self._sending || !prompt?.trim()) return;
 
         if ([...prompt].length > 500) {
-          wx.showToast({ title: (this as any).$t('aiDrawer.maxLength'), icon: 'none' });
+          wx.showToast({ title: (this as any).$t('aiDrawer.maxLength', { count: 500 }), icon: 'none' });
           return;
         }
 
@@ -285,7 +285,8 @@ Component({
 
     async _fetchDiaryCards(dates: string[], cancelToken?: CancelToken): Promise<any[]> {
       try {
-        const res = await request.post('/diary/info/dates', { data: { dates }, cancelToken });
+        // R3：AI 对话期间的后台卡片请求，偶发 401 不踢登录态（由 catch 静默处理）。
+        const res = await request.post('/diary/info/dates', { data: { dates }, cancelToken }, false, 20000, true);
         return (res.data || [])
           .filter((item: any) => item && item.recordDate)
           .map((item: any) => {
@@ -312,15 +313,24 @@ Component({
     },
 
     _fetchDiaryCardsForMessage(dates: string[], targetIndex: number) {
+      const list = this.data.list as any[];
+      const targetItem = list[targetIndex];
+      if (!targetItem || targetItem.type !== MESSAGE_TYPES.PPFJ) return;
+      // F2-08：先记录目标消息的 _msgId，回填完成时按 _msgId 重新定位当前索引，
+      // 避免请求期间列表被裁剪（trim/新消息插入）导致卡片挂到错误消息上。
+      const targetMsgId = targetItem._msgId;
       if ((this as any)._diaryCardsCancelToken) {
         try { (this as any)._diaryCardsCancelToken.cancel(); } catch {}
       }
-      (this as any)._diaryCardsCancelToken = createCancelToken();
-      this._fetchDiaryCards(dates, (this as any)._diaryCardsCancelToken).then((cards: any[]) => {
-        if (!this._isAlive()) return;
-        const targetItem = this.data.list[targetIndex];
-        if (targetItem?.type !== MESSAGE_TYPES.PPFJ) return;
-        this._safeSetData({ [`list[${targetIndex}].diaryCard`]: cards.slice(0, MAX_MESSAGE_COUNT) });
+      const cancelToken = createCancelToken();
+      (this as any)._diaryCardsCancelToken = cancelToken;
+      this._fetchDiaryCards(dates, cancelToken).then((cards: any[]) => {
+        if (!this._isAlive() || cancelToken.isCancelled()) return;
+        const currentList = this.data.list as any[];
+        const idx = currentList.findIndex((item: any) => item._msgId === targetMsgId);
+        if (idx < 0) return;
+        if (currentList[idx]?.type !== MESSAGE_TYPES.PPFJ) return;
+        this._safeSetData({ [`list[${idx}].diaryCard`]: cards.slice(0, MAX_MESSAGE_COUNT) });
       });
     },
 
@@ -428,10 +438,28 @@ Component({
         }
       }
 
+      // R4：本轮消息的幂等标识。eventSource 断线重连会复用同一 data 对象重发，
+      // 后端据此精确识别"同一轮消息的重连"而非"重复发了两条相同消息"。
+      const requestId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       const sse = eventSource({
         url: `${sseBaseURL}/ai/chat`,
         header: sseHeaders,
-        data: { message, history },
+        data: { message, history, request_id: requestId },
+        onreconnect: () => {
+          if (this._isDestroyed || this._isDetached) return;
+          // 自动重连前清空半截输出：新流会重新 onopen 建立气泡，避免新旧内容拼接。
+          self._aiText = '';
+          self._aiTextDirty = false;
+          if ((this as any)._aiFlushTimer) {
+            clearTimeout((this as any)._aiFlushTimer);
+            (this as any)._aiFlushTimer = null;
+          }
+          const list = this.data.list as any[];
+          const lastIndex = list.length - 1;
+          if (lastIndex >= 0 && list[lastIndex].type === MESSAGE_TYPES.PPFJ && !list[lastIndex].html) {
+            this._safeSetData({ list: list.slice(0, lastIndex), loading: true });
+          }
+        },
         onopen: () => {
           if (this._isDestroyed || this._isDetached) return;
           const aiMsg = { type: MESSAGE_TYPES.PPFJ, txt: '', html: '', diaryCard: [], _msgId: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}` };
@@ -542,6 +570,7 @@ Component({
 
     onQuotaDialogConfirm() {
       this._safeSetData({ showQuotaDialog: false });
+      wx.navigateTo({ url: '/pages/sub/Vip/Vip' });
     },
 
     onQuotaDialogClose() {

@@ -1,5 +1,5 @@
 import { get } from './http';
-import dayjs from 'dayjs';
+import dayjs from '../lib/dayjs';
 import { logger, sanitizeUrlForLog } from './logger';
 import { i18n } from './i18n';
 
@@ -58,7 +58,8 @@ export const getSystemInfo = () => {
   const navbarHeight = (capsuleInfo.top - statusBarHeight) * 2 + capsuleInfo.height;
 
   const safeArea = result.safeArea || {};
-  const screenHeight = Math.max(result.screenHeight || 667, result.screenWidth || 375);
+  // 直接用 screenHeight：横屏时取 max(高,宽) 会拿到宽度导致底部安全区算错。
+  const screenHeight = result.screenHeight || 667;
   const safeAreaHeight = Math.max(safeArea.height || 0, safeArea.width || 0);
   const bottomSafeHeight = safeAreaHeight && screenHeight
     ? Math.max(screenHeight - safeAreaHeight - statusBarHeight, 0)
@@ -74,6 +75,32 @@ export const getSystemInfo = () => {
   return result;
 };
 
+
+// formatTimeLabel 统一的"时段+时间"展示（NoteEdit 与 TimePicker 共用）。
+// 曾有两份实现且映射漂移（9-11 点上午 vs 9-12 点中午），此处收敛为单一来源。
+export const formatTimeLabel = (hour: number, minute: number): string => {
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return '';
+  let periodKey = '';
+  if (hour === 0) {
+    periodKey = 'timePicker.period.midnight';
+  } else if (hour >= 1 && hour <= 4) {
+    periodKey = 'timePicker.period.earlyMorning';
+  } else if (hour >= 5 && hour <= 8) {
+    periodKey = 'timePicker.period.morning';
+  } else if (hour >= 9 && hour <= 11) {
+    periodKey = 'timePicker.period.forenoon';
+  } else if (hour === 12) {
+    periodKey = 'timePicker.period.noon';
+  } else if (hour >= 13 && hour <= 18) {
+    periodKey = 'timePicker.period.afternoon';
+  } else {
+    periodKey = 'timePicker.period.evening';
+  }
+  const period = i18n.t(periodKey);
+  const displayHour = hour === 0 ? 12 : (hour <= 12 ? hour : hour - 12);
+  const displayMinute = minute < 10 ? `0${minute}` : `${minute}`;
+  return `${period} ${displayHour}:${displayMinute}`;
+};
 
 export interface ReverseAddressResult {
   address: string;

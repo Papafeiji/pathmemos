@@ -24,7 +24,7 @@
       <view class="invite-list">
         <block wx:if="{{list.length}}">
           <view class="invite-item" wx:for="{{list}}" wx:key="userId">
-            <image class="avatar" src="{{item.avatarUrl || '/image/papa_logo.png'}}" />
+            <image class="avatar" src="{{item.avatarUrl || '/image/papa_logo.png'}}" lazy-load />
             <view class="info">
               <view class="nick-name">{{item.nickName || _i18n['invite.wechatUser']}}</view>
             </view>

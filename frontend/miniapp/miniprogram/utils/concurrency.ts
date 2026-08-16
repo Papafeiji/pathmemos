@@ -16,7 +16,8 @@ export async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurr
     await _pump();
   };
 
-  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => _pump());
+  const workerCount = Math.max(1, Math.min(concurrency, tasks.length));
+  const workers = Array.from({ length: workerCount }, () => _pump());
   await Promise.all(workers);
   return results;
 }

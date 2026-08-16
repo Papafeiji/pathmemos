@@ -59,17 +59,18 @@ func normalizeDate(s string) (string, error) {
 }
 
 var (
-	ErrFamilyMismatch         = errors.New("family mismatch")
-	ErrMemberNotFound         = errors.New("member not found")
-	ErrEntryNotFound          = errors.New("entry not found")
-	ErrPermissionDenied       = errors.New("permission denied")
-	ErrFileNotFound           = errors.New("file not found")
-	ErrNotFileOwner           = errors.New("file does not belong to user")
-	ErrFileNotImage           = errors.New("file is not an image")
-	ErrMemoryNotFound         = errors.New("memory not found")
-	ErrCoverImageNotFromDiary = errors.New("cover image must be from today's diary")
-	ErrRecordTimeCrossDay     = errors.New("record time cannot cross day")
-	ErrCoverUpdateInProgress  = errors.New("cover update in progress")
+	ErrFamilyMismatch            = errors.New("family mismatch")
+	ErrMemberNotFound            = errors.New("member not found")
+	ErrEntryNotFound             = errors.New("entry not found")
+	ErrPermissionDenied          = errors.New("permission denied")
+	ErrFileNotFound              = errors.New("file not found")
+	ErrNotFileOwner              = errors.New("file does not belong to user")
+	ErrFileNotImage              = errors.New("file is not an image")
+	ErrMemoryNotFound            = errors.New("memory not found")
+	ErrCoverImageNotFromDiary    = errors.New("cover image must be from today's diary")
+	ErrRecordTimeCrossDay        = errors.New("record time cannot cross day")
+	ErrCoverUpdateInProgress     = errors.New("cover update in progress")
+	ErrDailyReverseQuotaExceeded = errors.New("daily reverse geocode quota exceeded")
 )
 
 type NewPlaceAlerter interface {
@@ -183,13 +184,13 @@ func (s *Service) ListInfoCards(ctx context.Context, userID, cursorDate string, 
 	var nextCursor string
 	var lastIncludedDate string
 	for _, d := range dates {
-		if len(targetDates) >= size {
-
-			nextCursor = lastIncludedDate
-			break
-		}
 		targetDates = append(targetDates, d)
 		lastIncludedDate = d
+	}
+	// R2-05：SQL LIMIT 作用在 distinct_dates CTE 上，dates 恒 ≤ size；
+	// 取满一页即设置游标（下一页按 record_date < cursor 去重），否则更早记录不可达。
+	if len(targetDates) >= size {
+		nextCursor = lastIncludedDate
 	}
 
 	cards, err := s.buildCardsForDates(ctx, familyID, targetDates, grouped, memberMap, memberIDs, userID)
@@ -412,7 +413,7 @@ func (s *Service) groupAddressRecordsByDate(rows []sqlc.ListAddressEntriesByDate
 			}
 			if len(unique) > 0 {
 				records = append(records, map[string]interface{}{
-					"familyMemberAvatar":        avatarURLWithDefault(m.Avatar, userID, s.sysCfg.DefaultAvatarURL),
+					"familyMemberAvatar":        util.AvatarURLOrDefault(m.Avatar, userID, s.sysCfg.DefaultAvatarURL),
 					"familyMemberAddressConcat": strings.Join(unique, "—"),
 				})
 			}
@@ -661,27 +662,95 @@ func (s *Service) CreateMemory(ctx context.Context, userID, title, content strin
 	if err != nil {
 		return "", err
 	}
+
+	// 记忆新增后异步失效 MCP 查询缓存，失败由 30 分钟 TTL 兜底。
+	safe.Go(context.WithoutCancel(ctx), nil, func() {
+		mcp.InvalidateUserCache(context.WithoutCancel(ctx), s.rdb, userID)
+	})
 	return id, nil
 }
 
 func (s *Service) UpdateMemory(ctx context.Context, userID, memoryID, title, content string, recordTime time.Time) error {
 	t := recordTime.In(timeutil.Shanghai)
 	recordDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-	memory, err := s.pool.Queries().UpdateMemory(ctx, sqlc.UpdateMemoryParams{
-		Title:      title,
-		Content:    content,
-		RecordTime: pgtype.Timestamptz{Time: recordTime, Valid: true},
-		RecordDate: pgtype.Date{Time: recordDate, Valid: true},
-		ID:         memoryID,
-		UserID:     userID,
-	})
+	newDate := pgtype.Date{Time: recordDate, Valid: true}
+
+	// 读取旧记录日期：改期后需清理旧日期的空 diary 行，避免残留幽灵空卡片。
+	oldMemory, err := s.pool.Queries().GetMemory(ctx, sqlc.GetMemoryParams{ID: memoryID, UserID: userID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrMemoryNotFound
 		}
-		return fmt.Errorf("update memory: %w", err)
+		return fmt.Errorf("get memory: %w", err)
 	}
-	_ = memory
+
+	err = db.WithTx(ctx, s.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
+		if _, err := q.UpdateMemory(ctx, sqlc.UpdateMemoryParams{
+			Title:      title,
+			Content:    content,
+			RecordTime: pgtype.Timestamptz{Time: recordTime, Valid: true},
+			RecordDate: newDate,
+			ID:         memoryID,
+			UserID:     userID,
+		}); err != nil {
+			return fmt.Errorf("update memory: %w", err)
+		}
+
+		// 确保新日期存在 diary 行（与 CreateMemory 一致），否则改期后该记忆在首页列表不出现卡片。
+		if _, err := q.UpsertDiary(ctx, sqlc.UpsertDiaryParams{
+			ID:         memoryID,
+			UserID:     userID,
+			RecordDate: newDate,
+		}); err != nil {
+			return fmt.Errorf("upsert diary for memory: %w", err)
+		}
+
+		// 日期未变则无需清理旧日记。
+		if oldMemory.RecordDate.Time.Format("2006-01-02") == recordDate.Format("2006-01-02") {
+			return nil
+		}
+
+		// 旧日期 diary 若无 entries 且无 memories 则删除，避免幽灵空卡片。
+		diary, err := q.GetDiaryByUserAndDate(ctx, sqlc.GetDiaryByUserAndDateParams{
+			UserID:     userID,
+			RecordDate: oldMemory.RecordDate,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return fmt.Errorf("get old diary: %w", err)
+		}
+		entryCount, err := q.CountDiaryEntriesByDiaryID(ctx, diary.ID)
+		if err != nil {
+			return fmt.Errorf("count diary entries: %w", err)
+		}
+		if entryCount > 0 {
+			return nil
+		}
+		memCount, err := q.CountMemoriesByUserAndDate(ctx, sqlc.CountMemoriesByUserAndDateParams{
+			UserID:  userID,
+			Column2: oldMemory.RecordDate,
+		})
+		if err != nil {
+			return fmt.Errorf("count memories: %w", err)
+		}
+		if memCount > 0 {
+			return nil
+		}
+		if err := q.DeleteDiaryByID(ctx, diary.ID); err != nil {
+			return fmt.Errorf("delete empty old diary: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// 记忆更新后异步失效 MCP 查询缓存，失败由 30 分钟 TTL 兜底。
+	safe.Go(context.WithoutCancel(ctx), nil, func() {
+		mcp.InvalidateUserCache(context.WithoutCancel(ctx), s.rdb, userID)
+	})
 	return nil
 }
 
@@ -739,13 +808,21 @@ func (s *Service) DeleteMemory(ctx context.Context, userID, memoryID string) err
 			return nil
 		}
 
-		_, err = q.DeleteDiaryAndEntriesReturningFileIDs(ctx, diary.ID)
+		err = q.DeleteDiaryByID(ctx, diary.ID)
 		if err != nil {
 			return fmt.Errorf("delete empty diary: %w", err)
 		}
 		return nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	// 记忆删除后异步失效 MCP 查询缓存，失败由 30 分钟 TTL 兜底。
+	safe.Go(context.WithoutCancel(ctx), nil, func() {
+		mcp.InvalidateUserCache(context.WithoutCancel(ctx), s.rdb, userID)
+	})
+	return nil
 }
 
 func (s *Service) UpdateCover(ctx context.Context, userID, familyID, recordDate string, coverImage pgtype.Text) (err error) {
@@ -948,9 +1025,9 @@ func (s *Service) DeleteDiary(ctx context.Context, userID, familyID, recordDate 
 		// 在事务内先锁定日记行、再删除图片关联并返回 file_id，最后删除日记。
 		// FOR UPDATE 阻止并发创建条目，确保返回的 file_id 与实际被级联删除的图片完全一致，
 		// 避免并发新增的图片条目被级联删除但其 fileID 未清理封面引用。
-		fileIDs, err = q.DeleteDiaryAndEntriesReturningFileIDs(ctx, diaryID.ID)
+		fileIDs, err = q.DeleteDiaryImagesReturningFileIDs(ctx, diaryID.ID)
 		if err != nil {
-			return fmt.Errorf("delete diary and entries: %w", err)
+			return fmt.Errorf("delete diary images: %w", err)
 		}
 		if len(fileIDs) > 0 {
 			if err := q.ClearFamilyDailyManualCoverByFileIDs(ctx, sqlc.ClearFamilyDailyManualCoverByFileIDsParams{
@@ -967,6 +1044,9 @@ func (s *Service) DeleteDiary(ctx context.Context, userID, familyID, recordDate 
 			}); err != nil {
 				return fmt.Errorf("clear image covers by file ids: %w", err)
 			}
+		}
+		if err := q.DeleteDiaryByID(ctx, diaryID.ID); err != nil {
+			return fmt.Errorf("delete diary: %w", err)
 		}
 		return nil
 	}); err != nil {
@@ -1279,9 +1359,9 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, entryID string) (fami
 		// 在事务内锁定条目行、删除图片关联并返回 file_id，最后删除条目。
 		// FOR UPDATE 阻止并发更新条目，确保返回的 file_id 与实际被级联删除的图片完全一致，
 		// 避免并发新增的图片被级联删除但其 fileID 未清理封面引用。
-		oldImageFileIDs, err = q.DeleteDiaryEntryReturningFileIDs(ctx, entryID)
+		oldImageFileIDs, err = q.DeleteDiaryEntryImagesReturningFileIDs(ctx, entryID)
 		if err != nil {
-			return fmt.Errorf("delete diary entry: %w", err)
+			return fmt.Errorf("delete diary entry images: %w", err)
 		}
 		if len(oldImageFileIDs) > 0 {
 			if err := q.ClearFamilyDailyManualCoverByFileIDs(ctx, sqlc.ClearFamilyDailyManualCoverByFileIDsParams{
@@ -1298,6 +1378,9 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, entryID string) (fami
 			}); err != nil {
 				return fmt.Errorf("clear image covers by file ids: %w", err)
 			}
+		}
+		if err := q.DeleteDiaryEntryByID(ctx, entryID); err != nil {
+			return fmt.Errorf("delete diary entry: %w", err)
 		}
 		if err := q.TouchDiaryUpdatedAt(ctx, entry.DiaryID); err != nil {
 			return fmt.Errorf("touch diary updated at: %w", err)
@@ -1319,7 +1402,7 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, entryID string) (fami
 		if memCount > 0 {
 			return nil
 		}
-		_, err = q.DeleteDiaryAndEntriesReturningFileIDs(ctx, entry.DiaryID)
+		err = q.DeleteDiaryByID(ctx, entry.DiaryID)
 		if err != nil {
 			return fmt.Errorf("delete empty diary: %w", err)
 		}
@@ -1355,6 +1438,11 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, entryID string) (fami
 func (s *Service) CreateAutoEntry(ctx context.Context, userID string, lat, lon float64) (entryID, familyID, recordDate string, err error) {
 	if err := validator.ValidateCoordinates(lat, lon); err != nil {
 		return "", "", "", fmt.Errorf("invalid coordinates: %w", err)
+	}
+
+	// R2-06：按用户日配额限制逆地理编码调用，防止恶意坐标耗尽腾讯地图配额影响正常用户。
+	if !location.CheckReverseQuota(ctx, s.rdb, userID) {
+		return "", "", "", ErrDailyReverseQuotaExceeded
 	}
 
 	landmark, address, err := s.reverseGeocode(ctx, lat, lon)
@@ -1576,6 +1664,11 @@ func (s *Service) deleteIfOnlySelfReferenced(ctx context.Context, fileID, selfEn
 }
 
 func (s *Service) RefreshFamilyDailyCover(ctx context.Context, familyID, recordDate string) error {
+	// 未配置 Redis 锁（如单元测试构造的最小 Service）时直接报错，
+	// 调用方对封面刷新失败仅记录日志，不影响主流程（正常路径行为不变）。
+	if s.lock == nil {
+		return fmt.Errorf("cover lock not configured")
+	}
 	_, err := s.refreshFamilyDailyCover(ctx, familyID, recordDate, true)
 	return err
 }
@@ -1615,16 +1708,30 @@ func (s *Service) refreshFamilyDailyCover(ctx context.Context, familyID, recordD
 			locs := postLockLocs
 			fid := familyID
 			rd := recordDate
-			safe.Go(context.Background(), nil, func() {
+			// 整个异步流程限时 30s（含腾讯静态地图限流等待与 HTTP 调用），
+			// 与同文件其它异步任务保持一致，避免 goroutine 无限滞留。
+			bctx, bcancel := context.WithTimeout(context.Background(), 30*time.Second)
+			safe.Go(bctx, nil, func() {
+				defer bcancel()
 				t, parseErr := time.Parse(dateFormat, rd)
 				if parseErr != nil {
 					slog.Error("invalid record date format for trajectory cover", slog.String("record_date", rd), slog.Any("error", parseErr))
 					return
 				}
 				recordDateTime := pgtype.Date{Time: t, Valid: true}
-				url, fileID, genErr := s.ensureTrajectoryCover(context.Background(), fid, rd, locs)
+				url, fileID, genErr := s.ensureTrajectoryCover(bctx, fid, rd, locs)
 				if genErr == nil && fileID != "" {
-					upsertErr := s.pool.Queries().UpsertFamilyDailyCover(context.Background(), sqlc.UpsertFamilyDailyCoverParams{
+					// 轨迹图生成耗时可达 30s，期间用户可能已通过 UpdateCover 设置手动封面；
+					// 先查当前封面，若已是 manual 则跳过 trajectory upsert，避免覆盖用户手动选择。
+					cur, curErr := s.pool.Queries().GetFamilyDailyCover(bctx, sqlc.GetFamilyDailyCoverParams{
+						FamilyID:   fid,
+						RecordDate: recordDateTime,
+					})
+					if curErr == nil && cur.CoverType == "manual" && cur.ManualCoverFileID.Valid && cur.ManualCoverFileID.String != "" {
+						slog.Info("skip trajectory cover upsert, manual cover set during generation", slog.String("family_id", fid), slog.String("record_date", rd))
+						return
+					}
+					upsertErr := s.pool.Queries().UpsertFamilyDailyCover(bctx, sqlc.UpsertFamilyDailyCoverParams{
 						FamilyID:          fid,
 						RecordDate:        recordDateTime,
 						CoverFileID:       pgtype.Text{String: fileID, Valid: true},
@@ -1634,12 +1741,12 @@ func (s *Service) refreshFamilyDailyCover(ctx context.Context, familyID, recordD
 					if upsertErr != nil {
 						slog.Error("post-lock upsert trajectory cover failed", slog.String("family_id", fid), slog.String("record_date", rd), slog.Any("error", upsertErr))
 					} else {
-						if rows, cleanupErr := s.deleteOldTrajectoryCovers(context.Background(), fid, rd, fileID); cleanupErr != nil {
+						if rows, cleanupErr := s.deleteOldTrajectoryCovers(bctx, fid, rd, fileID); cleanupErr != nil {
 							slog.Warn("post-lock delete old trajectory failed", slog.String("family_id", fid), slog.String("record_date", rd), slog.Any("error", cleanupErr))
 						} else {
-							s.deleteTrajectoryCoverFiles(context.Background(), rows, fileID)
+							s.deleteTrajectoryCoverFiles(context.WithoutCancel(bctx), rows, fileID)
 						}
-						s.InvalidateFamilySummary(context.Background(), fid)
+						s.InvalidateFamilySummary(bctx, fid)
 						slog.Debug("refresh family daily cover generate trajectory (post-lock)", slog.String("family_id", fid), slog.String("record_date", rd), slog.String("cover_file_id", fileID), slog.String("url", url))
 					}
 				} else if genErr != nil {
@@ -1819,6 +1926,17 @@ func (s *Service) refreshFamilyDailyCover(ctx context.Context, familyID, recordD
 func (s *Service) refreshCoverAsync(familyID, recordDate string) {
 	if familyID == "" {
 		return
+	}
+	// 去重节流：同一 family+date 的封面刷新带 30s TTL 去重，避免列表请求对每页最多 20 个
+	// 日期各起一个 goroutine 重复评估/抢锁（封面行未持久化期间每次请求都会触发）。
+	if s.rdb != nil {
+		dedupKey := fmt.Sprintf("lock:covers:refresh:%s:%s", familyID, recordDate)
+		ok, err := s.rdb.SetNX(context.Background(), dedupKey, "1", 30*time.Second).Result()
+		if err != nil {
+			slog.WarnContext(context.Background(), "cover refresh dedup check failed", slog.String("family_id", familyID), slog.String("record_date", recordDate), slog.Any("error", err))
+		} else if !ok {
+			return
+		}
 	}
 	safe.Go(context.Background(), nil, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -2152,8 +2270,8 @@ func (s *Service) buildCard(ctx context.Context, familyID, recordDate string, ro
 		}
 		memberBriefs = append(memberBriefs, map[string]interface{}{
 			"userId":     m.UserID,
-			"avatarUrl":  avatarURLWithDefault(m.Avatar, m.UserID, s.sysCfg.DefaultAvatarURL),
-			"nickName":   textInterface(m.Nickname),
+			"avatarUrl":  util.AvatarURLOrDefault(m.Avatar, m.UserID, s.sysCfg.DefaultAvatarURL),
+			"nickName":   util.ToInterface(m.Nickname),
 			"entryCount": countMap[m.UserID],
 		})
 	}
@@ -2239,15 +2357,17 @@ func entryToMap(e sqlc.ListDiaryEntriesRow, storage *file.Storage, memberMap map
 		v, latErr := e.Lat.Float64Value()
 		if latErr != nil {
 			slog.Warn("mcp entry lat Float64Value overflow", slog.Any("error", latErr))
+		} else {
+			lat = v.Float64
 		}
-		lat = v.Float64
 	}
 	if e.Lon.Valid {
 		v, lonErr := e.Lon.Float64Value()
 		if lonErr != nil {
 			slog.Warn("mcp entry lon Float64Value overflow", slog.Any("error", lonErr))
+		} else {
+			lon = v.Float64
 		}
-		lon = v.Float64
 	}
 
 	var recordTime interface{}
@@ -2257,8 +2377,8 @@ func entryToMap(e sqlc.ListDiaryEntriesRow, storage *file.Storage, memberMap map
 
 	var creatorAvatar, creatorNickname interface{}
 	if m, ok := memberMap[e.CreatedBy]; ok {
-		creatorAvatar = avatarURLWithDefault(m.Avatar, e.CreatedBy, defaultAvatarURL)
-		creatorNickname = textInterface(m.Nickname)
+		creatorAvatar = util.AvatarURLOrDefault(m.Avatar, e.CreatedBy, defaultAvatarURL)
+		creatorNickname = util.ToInterface(m.Nickname)
 	}
 
 	return map[string]interface{}{
@@ -2283,8 +2403,8 @@ func entryToMap(e sqlc.ListDiaryEntriesRow, storage *file.Storage, memberMap map
 func memoryToMap(m sqlc.ListMemoriesByUserAndDateRow, userID string, memberMap map[string]sqlc.ListFamilyMembersRow, defaultAvatarURL string) map[string]interface{} {
 	var creatorAvatar, creatorNickname interface{}
 	if mem, ok := memberMap[userID]; ok {
-		creatorAvatar = avatarURLWithDefault(mem.Avatar, userID, defaultAvatarURL)
-		creatorNickname = textInterface(mem.Nickname)
+		creatorAvatar = util.AvatarURLOrDefault(mem.Avatar, userID, defaultAvatarURL)
+		creatorNickname = util.ToInterface(mem.Nickname)
 	}
 
 	return map[string]interface{}{
@@ -2443,6 +2563,10 @@ func (s *Service) coverURLFromParts(fileID, path, storageType string) (string, b
 }
 
 func (s *Service) coverURLFromRow(cover sqlc.GetFamilyDailyCoverRow) (string, bool, error) {
+	// M2：cover_type='default' 时不使用任何文件图，防止触发器保留的 cover_file_id（B3-08）或历史脏数据被误展示。
+	if cover.CoverType == "default" {
+		return "", false, nil
+	}
 	fileID := ""
 	if cover.CoverFileID.Valid {
 		fileID = cover.CoverFileID.String
@@ -2459,6 +2583,10 @@ func (s *Service) coverURLFromRow(cover sqlc.GetFamilyDailyCoverRow) (string, bo
 }
 
 func (s *Service) coverURLFromListRow(c sqlc.ListFamilyDailyCoversRow) (string, bool, error) {
+	// M2：cover_type='default' 时不使用任何文件图，防止触发器保留的 cover_file_id（B3-08）或历史脏数据被误展示。
+	if c.CoverType == "default" {
+		return "", false, nil
+	}
 	fileID := ""
 	if c.CoverFileID.Valid {
 		fileID = c.CoverFileID.String
@@ -2530,6 +2658,11 @@ func (s *Service) GetCoverURL(ctx context.Context, familyID, recordDate string) 
 		}
 		return "", err
 	}
+	// M2：cover_type='default' 时返回默认占位图，防止触发器保留的 cover_file_id（B3-08）或历史脏数据
+	// 被轮询端点误展示为旧图（与 coverURLFromRow/coverURLFromListRow 的 M2 防护保持一致）。
+	if cover.CoverType == "default" {
+		return s.defaultCoverURL(), nil
+	}
 	url, urlErr := s.fileURL(cover.CoverPath.String, cover.CoverStorageType.String)
 	if urlErr != nil || url == "" {
 		return s.defaultCoverURL(), nil
@@ -2548,23 +2681,6 @@ func (s *Service) InvalidateFamilySummary(ctx context.Context, familyID string) 
 
 func familySummaryKey(familyID string) string {
 	return "ai:family_summary:" + familyID
-}
-
-func avatarURLWithDefault(avatar pgtype.Text, userID, defaultAvatarURL string) interface{} {
-	if !avatar.Valid || avatar.String == "" {
-		if defaultAvatarURL == "" {
-			return nil
-		}
-		return defaultAvatarURL + userID
-	}
-	return avatar.String
-}
-
-func textInterface(t pgtype.Text) interface{} {
-	if !t.Valid || t.String == "" {
-		return nil
-	}
-	return t.String
 }
 
 func parseDate(s string) (pgtype.Date, error) {

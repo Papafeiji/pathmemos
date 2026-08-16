@@ -4,34 +4,9 @@
  * 注意：这些测试不依赖微信小程序环境，仅测试纯计算逻辑。
  */
 
-// --- concurrency.ts 测试 ---
+// --- concurrency.ts 测试（直接测真实模块，不再复制实现）---
 
-type Task<T> = () => Promise<T>;
-
-async function runWithConcurrency<T>(tasks: Task<T>[], limit: number): Promise<T[][]> {
-  const results: T[][] = [];
-  const queue = [...tasks];
-  const workers: Promise<void>[] = [];
-
-  for (let i = 0; i < limit && queue.length > 0; i++) {
-    workers.push(
-      (async () => {
-        while (queue.length > 0) {
-          const task = queue.shift()!;
-          try {
-            const result = await task();
-            results.push([result]);
-          } catch (e) {
-            results.push([e as T]);
-          }
-        }
-      })()
-    );
-  }
-  await Promise.all(workers);
-  // Flatten
-  return results;
-}
+import { runWithConcurrency } from '../miniprogram/utils/concurrency';
 
 async function test_concurrency_runsAllTasks() {
   let count = 0;
@@ -53,7 +28,10 @@ async function test_concurrency_preservesOrder() {
   ];
   const results = await runWithConcurrency(tasks, 1);
   if (results.length !== 3) throw new Error(`expected 3 results, got ${results.length}`);
-  console.log('PASS: concurrency handles errors');
+  // 真实实现按索引原位存储结果/错误，保持与输入对齐。
+  if (results[0] !== 'first' || results[1] !== 'second') throw new Error('order not preserved');
+  if (!((results[2] as any) instanceof Error)) throw new Error('error not stored in place');
+  console.log('PASS: concurrency preserves order and stores errors in place');
 }
 
 async function test_concurrency_emptyInput() {

@@ -1,0 +1,68 @@
+{
+  "miniVersion": "v2",
+  "name": "pathmemos",
+  "version": "0.0.1",
+  "versionCode": 100,
+  "i18nFilePath": "i18n",
+  "mini-ohos": {
+    "sdkVersion": "0.5.1"
+  },
+  "mini-android": {
+    "resourcePath": "miniapp/android/nativeResources",
+    "sdkVersion": "1.7.0",
+    "toolkitVersion": "0.11.0",
+    "useExtendedSdk": {
+      "media": false,
+      "bluetooth": false,
+      "network": false,
+      "scanner": false,
+      "xweb": false
+    },
+    "icons": {
+      "hdpi": "resources/android/icon-hdpi.png",
+      "xhdpi": "resources/android/icon-xhdpi.png",
+      "xxhdpi": "resources/android/icon-xxhdpi.png",
+      "xxxhdpi": "resources/android/icon-xxxhdpi.png"
+    },
+    "splashscreen": {
+      "hdpi": "resources/android/splash-hdpi.png",
+      "xhdpi": "resources/android/splash-xhdpi.png",
+      "xxhdpi": "resources/android/splash-xxhdpi.png"
+    },
+    "enableVConsole": "close",
+    "privacy": {
+      "enable": true
+    }
+  },
+  "mini-ios": {
+    "sdkVersion": "1.7.0",
+    "toolkitVersion": "0.0.9",
+    "useExtendedSdk": {
+      "WeAppOpenFuns": true,
+      "WeAppNetwork": false,
+      "WeAppBluetooth": false,
+      "WeAppMedia": false,
+      "WeAppLBS": false,
+      "WeAppOthers": false
+    },
+    "enableVConsole": "close",
+    "icons": {
+      "mainIcon120": "resources/ios/icon-mainIcon120.png",
+      "mainIcon180": "resources/ios/icon-mainIcon180.png",
+      "spotlightIcon80": "resources/ios/icon-spotlightIcon80.png",
+      "spotlightIcon120": "resources/ios/icon-spotlightIcon120.png",
+      "settingsIcon58": "resources/ios/icon-settingsIcon58.png",
+      "settingsIcon87": "resources/ios/icon-settingsIcon87.png",
+      "notificationIcon40": "resources/ios/icon-notificationIcon40.png",
+      "notificationIcon60": "resources/ios/icon-notificationIcon60.png",
+      "appStore1024": "resources/ios/icon-appStore1024.png"
+    },
+    "splashScreen": {
+      "customImage": "resources/ios/splash.png"
+    },
+    "privacy": {
+      "enable": true
+    },
+    "enableOpenUrlNavigate": true
+  }
+}

@@ -100,7 +100,7 @@ Component({
       try {
         const coverImage = this.data.coverImageId;
         const info = {
-          id: this.data.info.id,
+          id: (this.data.info as any)?.id ?? '',
           coverImage,
         };
         await request.put('/diary/info', { data: info, cancelToken }, true);

@@ -3,13 +3,10 @@ package payment
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/sha1"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
 
 	"papafeiji/backend/internal/config"
 )
@@ -136,12 +133,4 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
-}
-
-func verifyWechatMsgSignature(token, timestamp, nonce, signature string) bool {
-	arr := []string{token, timestamp, nonce}
-	sort.Strings(arr)
-	sum := sha1.Sum([]byte(arr[0] + arr[1] + arr[2]))
-	expected := hex.EncodeToString(sum[:])
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) == 1
 }

@@ -1,3 +1,65 @@
+-- 合并基线（2026-08-15）：将历史迁移 000001-000020 合并为单一 baseline，
+-- 内容以生产库当前 schema 为准（pg_dump --schema-only）。
+-- 注意：不包含 schema_migrations 表（由 migrate CLI / 应用启动器各自创建）。
+
+
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+
+
+
+
+COMMENT ON SCHEMA public IS '';
+
+
+
+
+
+
+
+
+
+CREATE FUNCTION public.fix_cover_type_on_null_fk() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    -- B3-08：manual→default 回退时保留 cover_file_id（可恢复信息），不再连带清空。
+    IF NEW.manual_cover_file_id IS NULL AND NEW.cover_type = 'manual' THEN
+        NEW.cover_type := 'default';
+    END IF;
+    IF NEW.cover_file_id IS NULL AND NEW.cover_type IN ('image', 'trajectory') THEN
+        NEW.cover_type := 'default';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+
+CREATE TABLE public.ai_daily_quota_usage (
+    user_id text NOT NULL,
+    quota_date date NOT NULL,
+    used integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+
 CREATE TABLE public.ai_dialog_logs (
     id text NOT NULL,
     user_id text NOT NULL,
@@ -9,16 +71,14 @@ CREATE TABLE public.ai_dialog_logs (
 
 
 
-
 CREATE TABLE public.api_keys (
     id text NOT NULL,
     user_id text NOT NULL,
     key_hash text NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    api_key text
+    api_key text NOT NULL
 );
-
 
 
 
@@ -36,7 +96,6 @@ CREATE TABLE public.auto_record_trajectories (
 
 
 
-
 CREATE TABLE public.diaries (
     id text NOT NULL,
     user_id text NOT NULL,
@@ -44,7 +103,6 @@ CREATE TABLE public.diaries (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
-
 
 
 
@@ -72,7 +130,6 @@ CREATE TABLE public.diary_entries (
 
 
 
-
 CREATE TABLE public.diary_entry_images (
     id text NOT NULL,
     diary_entry_id text NOT NULL,
@@ -83,13 +140,11 @@ CREATE TABLE public.diary_entry_images (
 
 
 
-
 CREATE TABLE public.families (
     id text NOT NULL,
     is_personal boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
-
 
 
 
@@ -105,7 +160,6 @@ CREATE TABLE public.family_daily_covers (
 
 
 
-
 CREATE TABLE public.family_members (
     id text NOT NULL,
     family_id text NOT NULL,
@@ -114,7 +168,6 @@ CREATE TABLE public.family_members (
     joined_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT family_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'member'::text])))
 );
-
 
 
 
@@ -139,7 +192,6 @@ CREATE TABLE public.files (
 
 
 
-
 CREATE TABLE public.memories (
     id text NOT NULL,
     user_id text NOT NULL,
@@ -149,7 +201,6 @@ CREATE TABLE public.memories (
     content text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
-
 
 
 
@@ -177,6 +228,8 @@ CREATE TABLE public.orders (
 
 
 
+
+
 CREATE TABLE public.sys_configs (
     id text DEFAULT 'default'::text NOT NULL,
     ai_config jsonb,
@@ -186,7 +239,6 @@ CREATE TABLE public.sys_configs (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT sys_configs_id_check CHECK ((id = 'default'::text))
 );
-
 
 
 
@@ -200,13 +252,27 @@ CREATE TABLE public.user_avatar_markers (
 
 
 
+CREATE TABLE public.user_common_addresses (
+    user_id text NOT NULL,
+    name text NOT NULL,
+    lat numeric(10,7) NOT NULL,
+    lon numeric(10,7) NOT NULL,
+    count integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_common_addresses_count_check CHECK ((count >= 0)),
+    CONSTRAINT user_common_addresses_lat_check CHECK (((lat >= ('-90'::integer)::numeric) AND (lat <= (90)::numeric))),
+    CONSTRAINT user_common_addresses_lon_check CHECK (((lon >= ('-180'::integer)::numeric) AND (lon <= (180)::numeric)))
+);
+
+
 
 CREATE TABLE public.user_invite_codes (
     user_id text NOT NULL,
     short_code text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    used_at timestamp with time zone
 );
-
 
 
 
@@ -222,14 +288,12 @@ CREATE TABLE public.user_invites (
 
 
 
-
 CREATE TABLE public.user_vip_claims (
     id text NOT NULL,
     user_id text NOT NULL,
     vip_id text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
-
 
 
 
@@ -241,7 +305,6 @@ CREATE TABLE public.user_vips (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT user_vips_check CHECK ((expire_time > begin_time))
 );
-
 
 
 
@@ -263,14 +326,14 @@ CREATE TABLE public.users (
     session_key text,
     invited_by text,
     abnormal_subscribe_accepted boolean DEFAULT false NOT NULL,
-    abnormal_subscribe_quota integer DEFAULT 0 NOT NULL,
-    abnormal_alert_sent_date date,
-    new_place_alert_sent_date date,
+    abnormal_alert_sent_at timestamp with time zone,
     last_active_at timestamp with time zone,
+    lang text DEFAULT 'zh'::text NOT NULL,
+    image_storage_bytes bigint DEFAULT 0 NOT NULL,
     CONSTRAINT users_avatar_check CHECK (((avatar IS NULL) OR (length(avatar) <= 2048))),
+    CONSTRAINT users_image_storage_bytes_nonnegative CHECK ((image_storage_bytes >= 0)),
     CONSTRAINT users_user_type_check CHECK ((user_type = 'wechat'::text))
 );
-
 
 
 
@@ -292,7 +355,6 @@ CREATE TABLE public.vips (
 
 
 
-
 CREATE TABLE public.wx_mp_accounts (
     id text NOT NULL,
     user_id text,
@@ -308,6 +370,10 @@ CREATE TABLE public.wx_mp_accounts (
     CONSTRAINT wx_mp_accounts_avatar_check CHECK (((avatar IS NULL) OR (length(avatar) <= 2048)))
 );
 
+
+
+ALTER TABLE ONLY public.ai_daily_quota_usage
+    ADD CONSTRAINT ai_daily_quota_usage_pkey PRIMARY KEY (user_id, quota_date);
 
 
 
@@ -396,6 +462,14 @@ ALTER TABLE ONLY public.orders
 
 
 
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_transaction_id_key UNIQUE (transaction_id);
+
+
+
+
+
+
 ALTER TABLE ONLY public.sys_configs
     ADD CONSTRAINT sys_configs_pkey PRIMARY KEY (id);
 
@@ -408,6 +482,11 @@ ALTER TABLE ONLY public.family_members
 
 ALTER TABLE ONLY public.user_avatar_markers
     ADD CONSTRAINT user_avatar_markers_pkey PRIMARY KEY (user_id);
+
+
+
+ALTER TABLE ONLY public.user_common_addresses
+    ADD CONSTRAINT user_common_addresses_pkey PRIMARY KEY (user_id, name);
 
 
 
@@ -471,6 +550,10 @@ ALTER TABLE ONLY public.wx_mp_accounts
 
 
 
+CREATE INDEX idx_ai_daily_quota_usage_date ON public.ai_daily_quota_usage USING btree (quota_date);
+
+
+
 CREATE INDEX idx_ai_dialog_logs_created_at ON public.ai_dialog_logs USING btree (created_at);
 
 
@@ -488,6 +571,10 @@ CREATE UNIQUE INDEX idx_api_keys_key_hash ON public.api_keys USING btree (key_ha
 
 
 CREATE INDEX idx_auto_record_trajectories_created_at ON public.auto_record_trajectories USING btree (created_at);
+
+
+
+CREATE INDEX idx_auto_record_trajectories_geocode_attempts ON public.auto_record_trajectories USING btree (geocode_attempts);
 
 
 
@@ -519,11 +606,19 @@ CREATE INDEX idx_diary_entries_created_by_record_time ON public.diary_entries US
 
 
 
+CREATE INDEX idx_diary_entries_creator_address ON public.diary_entries USING btree (created_by, address) WHERE ((address IS NOT NULL) AND (address <> ''::text));
+
+
+
 CREATE INDEX idx_diary_entries_diary_created_at ON public.diary_entries USING btree (diary_id, created_at DESC);
 
 
 
 CREATE INDEX idx_diary_entries_diary_sort_time ON public.diary_entries USING btree (diary_id, sort, record_time, created_at);
+
+
+
+CREATE INDEX idx_diary_entries_updated_at ON public.diary_entries USING btree (updated_at);
 
 
 
@@ -607,6 +702,10 @@ CREATE INDEX idx_orders_vip_id ON public.orders USING btree (vip_id);
 
 
 
+CREATE INDEX idx_user_invite_codes_short_code_lookup ON public.user_invite_codes USING btree (short_code);
+
+
+
 CREATE INDEX idx_user_invites_inviter_created ON public.user_invites USING btree (inviter_id, created_at DESC);
 
 
@@ -620,6 +719,10 @@ CREATE INDEX idx_user_invites_reward_inviter_at ON public.user_invites USING btr
 
 
 CREATE INDEX idx_user_vip_claims_user_created ON public.user_vip_claims USING btree (user_id, created_at);
+
+
+
+CREATE INDEX idx_user_vip_claims_vip_id ON public.user_vip_claims USING btree (vip_id);
 
 
 
@@ -672,6 +775,10 @@ CREATE INDEX idx_wx_mp_accounts_user_id ON public.wx_mp_accounts USING btree (us
 
 
 CREATE UNIQUE INDEX uq_orders_transaction_id_not_null ON public.orders USING btree (transaction_id) WHERE ((transaction_id IS NOT NULL) AND (transaction_id <> ''::text));
+
+
+
+CREATE TRIGGER trg_family_daily_covers_fix_type BEFORE INSERT OR UPDATE ON public.family_daily_covers FOR EACH ROW EXECUTE FUNCTION public.fix_cover_type_on_null_fk();
 
 
 
@@ -756,7 +863,7 @@ ALTER TABLE ONLY public.orders
 
 
 ALTER TABLE ONLY public.orders
-    ADD CONSTRAINT orders_vip_id_fkey FOREIGN KEY (vip_id) REFERENCES public.vips(id) ON DELETE CASCADE;
+    ADD CONSTRAINT orders_vip_id_fkey FOREIGN KEY (vip_id) REFERENCES public.vips(id);
 
 
 
@@ -786,7 +893,7 @@ ALTER TABLE ONLY public.user_vip_claims
 
 
 ALTER TABLE ONLY public.user_vip_claims
-    ADD CONSTRAINT user_vip_claims_vip_id_fkey FOREIGN KEY (vip_id) REFERENCES public.vips(id) ON DELETE CASCADE;
+    ADD CONSTRAINT user_vip_claims_vip_id_fkey FOREIGN KEY (vip_id) REFERENCES public.vips(id);
 
 
 
@@ -812,11 +919,6 @@ ALTER TABLE ONLY public.users
 
 ALTER TABLE ONLY public.wx_mp_accounts
     ADD CONSTRAINT wx_mp_accounts_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
-
-
-
 
 
 

@@ -184,25 +184,26 @@ func (q *Queries) CountWeeklyDiaryEntriesByUsers(ctx context.Context, arg CountW
 	return count, err
 }
 
-const deleteDiaryAndEntriesReturningFileIDs = `-- name: DeleteDiaryAndEntriesReturningFileIDs :many
-WITH locked AS (
-    SELECT diaries.id FROM diaries WHERE diaries.id = $1 FOR UPDATE
-),
-deleted_images AS (
-    DELETE FROM diary_entry_images
-    WHERE diary_entry_id IN (SELECT diary_entries.id FROM diary_entries WHERE diary_entries.diary_id = $1)
-    RETURNING file_id
-),
-deleted_diary AS (
-    DELETE FROM diaries WHERE diaries.id = $1
-)
-SELECT DISTINCT file_id FROM deleted_images
+const deleteDiaryByID = `-- name: DeleteDiaryByID :exec
+DELETE FROM diaries WHERE id = $1
 `
 
-// 在事务内先锁定日记行、再删除图片关联并返回 file_id，最后删除日记（级联删除条目）。
-// FOR UPDATE 阻止并发创建条目，确保返回的 file_id 与实际被级联删除的图片完全一致。
-func (q *Queries) DeleteDiaryAndEntriesReturningFileIDs(ctx context.Context, id string) ([]string, error) {
-	rows, err := q.db.Query(ctx, deleteDiaryAndEntriesReturningFileIDs, id)
+func (q *Queries) DeleteDiaryByID(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, deleteDiaryByID, id)
+	return err
+}
+
+const deleteDiaryImagesReturningFileIDs = `-- name: DeleteDiaryImagesReturningFileIDs :many
+DELETE FROM diary_entry_images
+WHERE diary_entry_id IN (SELECT id FROM diary_entries WHERE diary_id = $1)
+RETURNING file_id
+`
+
+// 先删图片关联并返回 file_id，再由调用方在同一事务内删除日记（级联删除条目）。
+// 拆成两条语句：PostgreSQL 不保证同一 WITH 内多个数据修改 CTE 的执行顺序，
+// 若级联（删日记）先于显式 DELETE...RETURNING 执行，file_id 会为空导致文件漏清理。
+func (q *Queries) DeleteDiaryImagesReturningFileIDs(ctx context.Context, diaryID string) ([]string, error) {
+	rows, err := q.db.Query(ctx, deleteDiaryImagesReturningFileIDs, diaryID)
 	if err != nil {
 		return nil, err
 	}

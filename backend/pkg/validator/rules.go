@@ -3,6 +3,7 @@ package validator
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -31,10 +32,11 @@ func ValidateNickname(s string) error {
 }
 
 func ValidateCoordinates(lat, lon float64) error {
-	if lat < -90 || lat > 90 {
+	// NaN/Inf 与任何值比较都为 false，必须显式拒绝，否则会写入 DB 脏数据。
+	if math.IsNaN(lat) || math.IsInf(lat, 0) || lat < -90 || lat > 90 {
 		return fmt.Errorf("lat out of range")
 	}
-	if lon < -180 || lon > 180 {
+	if math.IsNaN(lon) || math.IsInf(lon, 0) || lon < -180 || lon > 180 {
 		return fmt.Errorf("lon out of range")
 	}
 	return nil

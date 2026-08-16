@@ -32,7 +32,8 @@ func (l *KeyRateLimiter) allow(r *http.Request) bool {
 	}
 	key := l.keyFunc(r)
 	if key == "" {
-		return true
+		// B6a-03：空 key 直接拒绝（防御性）。当前调用方均保证非空 key。
+		return false
 	}
 	return l.sw.allow(key)
 }

@@ -14,6 +14,7 @@ import (
 	"papafeiji/backend/internal/db"
 	"papafeiji/backend/internal/db/sqlc"
 	"papafeiji/backend/internal/middleware"
+	dbx "papafeiji/backend/pkg/db"
 	"papafeiji/backend/pkg/util"
 
 	"github.com/jackc/pgx/v5"
@@ -64,10 +65,20 @@ func SeedOpenBackend(ctx context.Context, cfg *config.Config, pool *db.Pool, ses
 			InvitedBy:         pgtype.Text{String: "", Valid: false},
 		})
 		if err != nil {
-			return fmt.Errorf("create default open user: %w", err)
+			if dbx.IsUniqueViolation(err) {
+				// B4-12：多副本并发启动竞态——另一副本已创建，重新读取即可。
+				existing, gerr := queries.GetUserByOpenID(ctx, defaultOpenID)
+				if gerr != nil {
+					return fmt.Errorf("re-fetch default open user: %w", gerr)
+				}
+				user = existing
+			} else {
+				return fmt.Errorf("create default open user: %w", err)
+			}
+		} else {
+			user.ID = created.ID
+			slog.InfoContext(ctx, "created default open user", slog.String("user_id", user.ID))
 		}
-		user.ID = created.ID
-		slog.InfoContext(ctx, "created default open user", slog.String("user_id", user.ID))
 	} else {
 		slog.InfoContext(ctx, "found existing default open user", slog.String("user_id", user.ID))
 	}
@@ -84,19 +95,12 @@ func SeedOpenBackend(ctx context.Context, cfg *config.Config, pool *db.Pool, ses
 	}
 
 	if err == nil {
-		// API Key 变更 → 强制清除所有 session，使所有用户重新登录，
-		// 避免旧 API Key 持有者通过缓存的 session 继续访问。
-		if sessions != nil {
-			slog.WarnContext(ctx, "OPEN_API_KEY changed; flushing all sessions")
-			if flushErr := sessions.FlushAllSessions(ctx); flushErr != nil {
-				return fmt.Errorf("flush sessions after key change: %w", flushErr)
-			}
-		}
-
 		keyID, err := util.NewUUID()
 		if err != nil {
 			return fmt.Errorf("generate api key id: %w", err)
 		}
+		// B4-11：先提交替换事务，成功后再 flush 所有 session——
+		// 避免事务失败时已产生“全部用户被登出但 key 未更换”的副作用。
 		if txErr := db.WithTx(ctx, pool.Pool(), func(txCtx context.Context, tx *sqlc.Queries) error {
 			if err := tx.DeleteAPIKeyByUser(txCtx, user.ID); err != nil {
 				return fmt.Errorf("delete stale open api key: %w", err)
@@ -118,6 +122,15 @@ func SeedOpenBackend(ctx context.Context, cfg *config.Config, pool *db.Pool, ses
 		}); txErr != nil {
 			return fmt.Errorf("sync open api key: %w", txErr)
 		}
+
+		// API Key 变更 → 强制清除所有 session，使所有用户重新登录，
+		// 避免旧 API Key 持有者通过缓存的 session 继续访问。
+		if sessions != nil {
+			slog.WarnContext(ctx, "OPEN_API_KEY changed; flushing all sessions")
+			if flushErr := sessions.FlushAllSessions(ctx); flushErr != nil {
+				return fmt.Errorf("flush sessions after key change: %w", flushErr)
+			}
+		}
 		slog.InfoContext(ctx, "open backend api key synced; all sessions flushed", slog.String("user_id", user.ID))
 		return nil
 	}
@@ -137,6 +150,11 @@ func SeedOpenBackend(ctx context.Context, cfg *config.Config, pool *db.Pool, ses
 		},
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// B4-12：ON CONFLICT (user_id) DO NOTHING 命中——并发副本已创建，视为成功。
+			slog.InfoContext(ctx, "open backend api key created by concurrent replica", slog.String("user_id", user.ID))
+			return nil
+		}
 		return fmt.Errorf("create default api key: %w", err)
 	}
 	slog.InfoContext(ctx, "open backend api key created", slog.String("user_id", user.ID))

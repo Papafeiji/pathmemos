@@ -136,9 +136,9 @@ INSERT INTO wx_mp_accounts (
 ON CONFLICT (mp_openid)
 DO UPDATE SET
     user_id = COALESCE(EXCLUDED.user_id, wx_mp_accounts.user_id),
-    unionid = EXCLUDED.unionid,
-    nickname = EXCLUDED.nickname,
-    avatar = EXCLUDED.avatar,
+    unionid = COALESCE(EXCLUDED.unionid, wx_mp_accounts.unionid),
+    nickname = COALESCE(EXCLUDED.nickname, wx_mp_accounts.nickname),
+    avatar = COALESCE(EXCLUDED.avatar, wx_mp_accounts.avatar),
     subscribed = EXCLUDED.subscribed,
     subscribe_time = EXCLUDED.subscribe_time,
     last_interact_time = EXCLUDED.last_interact_time,

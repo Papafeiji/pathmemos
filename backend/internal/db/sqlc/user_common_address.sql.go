@@ -11,6 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteUserCommonAddressByName = `-- name: DeleteUserCommonAddressByName :exec
+DELETE FROM user_common_addresses
+WHERE user_id = $1 AND name = $2
+`
+
+type DeleteUserCommonAddressByNameParams struct {
+	UserID string `json:"userId"`
+	Name   string `json:"name"`
+}
+
+func (q *Queries) DeleteUserCommonAddressByName(ctx context.Context, arg DeleteUserCommonAddressByNameParams) error {
+	_, err := q.db.Exec(ctx, deleteUserCommonAddressByName, arg.UserID, arg.Name)
+	return err
+}
+
 const deleteUserCommonAddresses = `-- name: DeleteUserCommonAddresses :exec
 DELETE FROM user_common_addresses WHERE user_id = $1
 `
@@ -75,6 +90,37 @@ func (q *Queries) GetUserCommonAddress(ctx context.Context, arg GetUserCommonAdd
 	return i, err
 }
 
+const getUserCommonAddressForUpdate = `-- name: GetUserCommonAddressForUpdate :one
+SELECT name, lat, lon, count
+FROM user_common_addresses
+WHERE user_id = $1 AND name = $2
+FOR UPDATE
+`
+
+type GetUserCommonAddressForUpdateParams struct {
+	UserID string `json:"userId"`
+	Name   string `json:"name"`
+}
+
+type GetUserCommonAddressForUpdateRow struct {
+	Name  string         `json:"name"`
+	Lat   pgtype.Numeric `json:"lat"`
+	Lon   pgtype.Numeric `json:"lon"`
+	Count int32          `json:"count"`
+}
+
+func (q *Queries) GetUserCommonAddressForUpdate(ctx context.Context, arg GetUserCommonAddressForUpdateParams) (GetUserCommonAddressForUpdateRow, error) {
+	row := q.db.QueryRow(ctx, getUserCommonAddressForUpdate, arg.UserID, arg.Name)
+	var i GetUserCommonAddressForUpdateRow
+	err := row.Scan(
+		&i.Name,
+		&i.Lat,
+		&i.Lon,
+		&i.Count,
+	)
+	return i, err
+}
+
 const insertUserCommonAddresses = `-- name: InsertUserCommonAddresses :exec
 INSERT INTO user_common_addresses (user_id, name, lat, lon, count, updated_at)
 SELECT unnest($1::text[]),
@@ -102,6 +148,46 @@ func (q *Queries) InsertUserCommonAddresses(ctx context.Context, arg InsertUserC
 		arg.Counts,
 	)
 	return err
+}
+
+const listLatestCoordinatesByAddresses = `-- name: ListLatestCoordinatesByAddresses :many
+SELECT DISTINCT ON (de.address)
+    de.address AS name, de.lat, de.lon
+FROM diary_entries AS de
+WHERE de.created_by = $1 AND de.address = ANY($2::text[])
+ORDER BY de.address, de.created_at DESC
+`
+
+type ListLatestCoordinatesByAddressesParams struct {
+	CreatedBy string   `json:"createdBy"`
+	Column2   []string `json:"column2"`
+}
+
+type ListLatestCoordinatesByAddressesRow struct {
+	Name pgtype.Text    `json:"name"`
+	Lat  pgtype.Numeric `json:"lat"`
+	Lon  pgtype.Numeric `json:"lon"`
+}
+
+// B2-12：按地址批量取最新坐标（DISTINCT ON），替代循环内逐条 N+1 查询。
+func (q *Queries) ListLatestCoordinatesByAddresses(ctx context.Context, arg ListLatestCoordinatesByAddressesParams) ([]ListLatestCoordinatesByAddressesRow, error) {
+	rows, err := q.db.Query(ctx, listLatestCoordinatesByAddresses, arg.CreatedBy, arg.Column2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLatestCoordinatesByAddressesRow{}
+	for rows.Next() {
+		var i ListLatestCoordinatesByAddressesRow
+		if err := rows.Scan(&i.Name, &i.Lat, &i.Lon); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listTopAddressesByUser = `-- name: ListTopAddressesByUser :many
@@ -187,15 +273,26 @@ const listUsersWithDiaryChangesSince = `-- name: ListUsersWithDiaryChangesSince 
 SELECT DISTINCT de.created_by
 FROM diary_entries AS de
 WHERE de.updated_at >= $1 AND de.updated_at < $2
+  AND de.created_by > $3
+ORDER BY de.created_by
+LIMIT $4
 `
 
 type ListUsersWithDiaryChangesSinceParams struct {
-	UpdatedAt   pgtype.Timestamptz `json:"updatedAt"`
-	UpdatedAt_2 pgtype.Timestamptz `json:"updatedAt2"`
+	UpdatedAt  pgtype.Timestamptz `json:"updatedAt"`
+	UpdatedAt2 pgtype.Timestamptz `json:"updatedAt2"`
+	Cursor     string             `json:"cursor"`
+	Limit      int32              `json:"limit"`
 }
 
+// keyset 游标分页：按 created_by 排序 + 游标 + LIMIT，避免一次性物化全部变更用户。
 func (q *Queries) ListUsersWithDiaryChangesSince(ctx context.Context, arg ListUsersWithDiaryChangesSinceParams) ([]string, error) {
-	rows, err := q.db.Query(ctx, listUsersWithDiaryChangesSince, arg.UpdatedAt, arg.UpdatedAt_2)
+	rows, err := q.db.Query(ctx, listUsersWithDiaryChangesSince,
+		arg.UpdatedAt,
+		arg.UpdatedAt2,
+		arg.Cursor,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -215,15 +312,13 @@ func (q *Queries) ListUsersWithDiaryChangesSince(ctx context.Context, arg ListUs
 }
 
 const mergeUserCommonAddress = `-- name: MergeUserCommonAddress :exec
-WITH deleted AS (
-    DELETE FROM user_common_addresses AS uca_del
-    WHERE uca_del.user_id = $1 AND uca_del.name = $2
-    RETURNING count
-)
-UPDATE user_common_addresses AS uca
-SET count = uca.count + COALESCE((SELECT d.count FROM deleted AS d), 0),
+INSERT INTO user_common_addresses (user_id, name, lat, lon, count, updated_at)
+SELECT src.user_id, $3, src.lat, src.lon, src.count, now()
+FROM user_common_addresses AS src
+WHERE src.user_id = $1 AND src.name = $2
+ON CONFLICT (user_id, name) DO UPDATE SET
+    count = user_common_addresses.count + EXCLUDED.count,
     updated_at = now()
-WHERE uca.user_id = $1 AND uca.name = $3
 `
 
 type MergeUserCommonAddressParams struct {
@@ -232,6 +327,9 @@ type MergeUserCommonAddressParams struct {
 	Name_2 string `json:"name2"`
 }
 
+// B2-09：upsert 目标行（源行坐标/计数随 INSERT 带入），目标行不存在时计数不再静默丢失；
+// ON CONFLICT 保证并发合并计数不丢。源行删除由 DeleteUserCommonAddressByName 在调用方事务内完成
+// （H2：sqlc 会静默丢弃同一 named 块中的第二条语句，不可合并写在这里）。
 func (q *Queries) MergeUserCommonAddress(ctx context.Context, arg MergeUserCommonAddressParams) error {
 	_, err := q.db.Exec(ctx, mergeUserCommonAddress, arg.UserID, arg.Name, arg.Name_2)
 	return err

@@ -1,5 +1,5 @@
 
-import dayjs from 'dayjs';
+import dayjs from '../../lib/dayjs';
 import { safeDayjs, getSystemInfo } from '../../utils/util';
 import request, { getBaseInfo, createCancelToken, resetLoading } from '../../utils/request';
 import { logger } from '../../utils/logger';
@@ -116,11 +116,12 @@ Page({
   _cancelToken: null as any,
   _loginCancelToken: null as any,
   _qrCancelToken: null as any,
+  _qrPromise: null as any,
   _isDestroyed: false,
   _isHidden: false,
   _coverPollTimer: null as any,
+  _coverPollFallbackTimer: null as any,
   _needReloadOnShow: false,
-  _shareTasks: [] as any[],
 
   updateNavTitle() {
     wx.setNavigationBarTitle({ title: (this as any).$t('noteDetail.title') });
@@ -203,6 +204,9 @@ Page({
     if (this._qrCancelToken) {
       try { this._qrCancelToken.cancel(); } catch {}
       this._qrCancelToken = null;
+      // 同时清空在途 Promise：否则其 finally 因 token 已置空而无法清 _qrPromise，
+      // 残留旧 Promise 使后续 _ensureQRCode 永远返回空结果。
+      this._qrPromise = null;
     }
     // 分享图生成不要在 onHide 中止，避免返回后 _generatingShare 处于 true 而按钮永久锁定；
     // 仅在 onUnload 中中止并复位状态。
@@ -235,6 +239,10 @@ Page({
       clearInterval(this._coverPollTimer);
       this._coverPollTimer = null;
     }
+    if ((this as any)._coverPollFallbackTimer) {
+      clearTimeout((this as any)._coverPollFallbackTimer);
+      (this as any)._coverPollFallbackTimer = null;
+    }
     if (this._cancelToken) {
       try { this._cancelToken.cancel(); } catch {}
       this._cancelToken = null;
@@ -246,8 +254,10 @@ Page({
     if (this._qrCancelToken) {
       try { this._qrCancelToken.cancel(); } catch {}
       this._qrCancelToken = null;
+      // 同时清空在途 Promise：否则其 finally 因 token 已置空而无法清 _qrPromise，
+      // 残留旧 Promise 使后续 _ensureQRCode 永远返回空结果。
+      this._qrPromise = null;
     }
-    this._abortShareTasks();
     if ((this as any)._scrollThrottleTimer) {
       clearTimeout((this as any)._scrollThrottleTimer);
       (this as any)._scrollThrottleTimer = null;
@@ -337,7 +347,7 @@ Page({
           size: PAGE_SIZE,
         },
         cancelToken,
-      });
+      }, true);
 
       this._cancelToken = null;
 
@@ -392,7 +402,8 @@ Page({
         return;
       }
       wx.showToast({ title: (this as any).$t('noteDetail.loadFail'), icon: 'none' });
-      this._safeSetData({ _loading: false });
+      // 请求失败回退页码，避免下次 loadMore 跳过当前页（page 在请求前已被置为目标页）。
+      this._safeSetData({ _loading: false, page: Math.max(1, page - 1) });
       if (didShowLoading) wx.hideLoading();
     }
   },
@@ -589,6 +600,9 @@ Page({
     if (this._qrCancelToken) {
       try { this._qrCancelToken.cancel(); } catch {}
       this._qrCancelToken = null;
+      // 同时清空在途 Promise：否则其 finally 因 token 已置空而无法清 _qrPromise，
+      // 残留旧 Promise 使后续 _ensureQRCode 永远返回空结果。
+      this._qrPromise = null;
     }
     this._safeSetData({ filteredList: [], imageList: [], isEmpty: false, _loading: false, page: 1, hasMore: true });
     let ok = false;
@@ -617,8 +631,15 @@ Page({
     const recordDate = this.data.baseInfo.recordDate;
     const cardID = this.data.baseInfo.id;
     (getApp() as any).globalData._pendingCoverPoll = { recordDate, cardID };
-    // 10s 兜底清理：用户可能不返回首页（切后台/杀进程/跳其他页）
-    setTimeout(() => {
+    // 10s 兜底清理：用户可能不返回首页（切后台/杀进程/跳其他页）。
+    // F4-11：句柄必须保存并在二次编辑/销毁时先清掉旧定时器，否则旧句柄到期会
+    // 误删新编辑设置的 _pendingCoverPoll（同 recordDate 场景）。
+    if ((this as any)._coverPollFallbackTimer) {
+      clearTimeout((this as any)._coverPollFallbackTimer);
+      (this as any)._coverPollFallbackTimer = null;
+    }
+    (this as any)._coverPollFallbackTimer = setTimeout(() => {
+      (this as any)._coverPollFallbackTimer = null;
       const p = (getApp() as any).globalData._pendingCoverPoll;
       if (p && p.recordDate === recordDate) {
         delete (getApp() as any).globalData._pendingCoverPoll;
@@ -633,24 +654,29 @@ Page({
     const recordDate = baseInfo.recordDate;
     const initialCover = baseInfo.coverImg;
     let polls = 0;
-    if (this._coverPollTimer) clearInterval(this._coverPollTimer);
-    this._coverPollTimer = setInterval(async () => {
+    if (this._coverPollTimer) clearTimeout(this._coverPollTimer);
+    // R2-F14：setTimeout 链式调度，弱网不并发叠加。
+    const tick = async () => {
       if (++polls > 12 || this._isDestroyed || this._isHidden) {
-        clearInterval(this._coverPollTimer);
         this._coverPollTimer = null;
         return;
       }
       try {
-        const res: any = await request.get('/diary/cover-url', { params: { familyId, recordDate } }, true);
+        // R3：封面轮询属后台请求，偶发 401 不踢登录态（由 catch 静默处理）。
+        const res: any = await request.get('/diary/cover-url', { params: { familyId, recordDate } }, true, true);
         const newCover = res?.data?.coverImg;
-        if (newCover && newCover !== initialCover) {
+        // R2-F11：封面被清空（空串）同样视为变更，提前停止轮询。
+        if (newCover !== undefined && newCover !== initialCover) {
           this._safeSetData({ 'baseInfo.coverImg': newCover });
           (getApp() as any).globalData._needRefreshIndexList = true;
-          clearInterval(this._coverPollTimer);
           this._coverPollTimer = null;
+          return;
         }
       } catch { /* poll failure is tolerated */ }
-    }, 500);
+      this._coverPollTimer = setTimeout(tick, 500);
+    };
+    this._coverPollTimer = setTimeout(tick, 500);
+
   },
 
   _filterListByTab(list: any[], activeTabId: string): any[] {
@@ -660,9 +686,24 @@ Page({
 
   bindTabChange(e: any) {
     const userId = e.currentTarget.dataset.userid || '';
-    const filteredList = this._filterListByTab(this._fullList, userId);
+    // 与 _refreshFromFullList 共用合并视图：否则切换任意 tab 后记忆条目从时间线消失。
+    const filteredList = this._filterListByTab(this._mergedFullList(), userId);
     (this as any)._safeSetData({ activeTabId: userId });
     this._chunkSetFilteredList(filteredList);
+  },
+
+  _mergedFullList(): any[] {
+    let fullList = this._fullList || [];
+    const memories = this._memories || [];
+    if (memories.length) {
+      fullList = [...fullList, ...memories].sort((a: any, b: any) => {
+        const ta = a.recordTime || '';
+        const tb = b.recordTime || '';
+        if (ta !== tb) return ta.localeCompare(tb);
+        return (a.source === 'memory' ? 1 : 0) - (b.source === 'memory' ? 1 : 0);
+      });
+    }
+    return fullList;
   },
 
   _chunkSetFilteredList(list: any[]) {
@@ -681,16 +722,7 @@ Page({
   },
 
   _refreshFromFullList(): any[] {
-    let fullList = this._fullList || [];
-    const memories = this._memories || [];
-    if (memories.length) {
-      fullList = [...fullList, ...memories].sort((a: any, b: any) => {
-        const ta = a.recordTime || '';
-        const tb = b.recordTime || '';
-        if (ta !== tb) return ta.localeCompare(tb);
-        return (a.source === 'memory' ? 1 : 0) - (b.source === 'memory' ? 1 : 0);
-      });
-    }
+    const fullList = this._mergedFullList();
 
     if (!fullList.length) {
       this._safeSetData({
@@ -784,30 +816,40 @@ Page({
     }
   },
 
-  async _ensureQRCode() {
-    if (this._isDestroyed || this._isHidden || this.data.qrCodeUrl || this.data._generatingQR || !this.data.isLogin) return;
+  _ensureQRCode() {
+    if (this._isDestroyed || this._isHidden || this.data.qrCodeUrl || !this.data.isLogin) return;
+    // F4-10：生成进行中时复用同一个 in-flight Promise，避免分享点击等重复调用
+    // 因 _generatingQR 早退而误报"二维码未生成"。
+    if (this._qrPromise) return this._qrPromise;
     if (this._qrCancelToken) {
       try { this._qrCancelToken.cancel(); } catch {}
     }
     const cancelToken = createCancelToken();
     this._qrCancelToken = cancelToken;
     this._safeSetData({ _generatingQR: true });
-    try {
-      const qrRes = await request.post('/invite/qrcode', { data: { raw: true }, cancelToken });
-      if (this._isDestroyed) return;
-      const url = qrRes.data?.url || '';
-      if (url) {
-        this._safeSetData({ qrCodeUrl: url });
+    const promise = (async () => {
+      try {
+        const qrRes = await request.post('/invite/qrcode', { data: { raw: true }, cancelToken });
+        if (this._isDestroyed) return;
+        const url = qrRes.data?.url || '';
+        if (url) {
+          this._safeSetData({ qrCodeUrl: url });
+        }
+      } catch (qrErr: any) {
+        if (qrErr?.message === 'request:abort') return;
+        logger.warn('预生成二维码失败', qrErr);
+      } finally {
+        this._safeSetData({ _generatingQR: false });
+        // 仅当仍是最新一次生成（cancelToken 未被新调用替换）时清理句柄，
+        // 避免新生成的 Promise 被旧任务的 finally 误清。
+        if (this._qrCancelToken === cancelToken) {
+          this._qrCancelToken = null;
+          this._qrPromise = null;
+        }
       }
-    } catch (qrErr: any) {
-      if (qrErr?.message === 'request:abort') return;
-      logger.warn('预生成二维码失败', qrErr);
-    } finally {
-      this._safeSetData({ _generatingQR: false });
-      if (this._qrCancelToken === cancelToken) {
-        this._qrCancelToken = null;
-      }
-    }
+    })();
+    this._qrPromise = promise;
+    return promise;
   },
 
   goBack() {
@@ -818,22 +860,12 @@ Page({
     }
   },
 
-  _abortShareTasks() {
-    if (this._shareTasks && this._shareTasks.length) {
-      this._shareTasks.forEach((task: any) => {
-        try { task.abort?.(); } catch {}
-      });
-      this._shareTasks = [];
-    }
-  },
-
   async onShareMoment() {
     if (this._isDestroyed || this.data._generatingShare) return;
     this._safeSetData({ _generatingShare: true });
     if (!this._isHidden) {
       wx.showLoading({ title: (this as any).$t('noteDetail.generating'), mask: true });
     }
-    this._shareTasks = [];
     try {
       let qrCodeUrl = this.data.qrCodeUrl || '';
       if (!qrCodeUrl) {
@@ -861,9 +893,8 @@ Page({
         currentUserId: this.data.currentUserId,
         qrCodeUrl,
       };
-      const tempPath = await generateShareImage(this, shareData, this._shareTasks);
+      const tempPath = await generateShareImage(this, shareData);
       if (this._isDestroyed || this._isHidden) {
-        this._abortShareTasks();
         wx.hideLoading();
         return;
       }
@@ -882,7 +913,6 @@ Page({
       logger.error('生成分享图失败', e);
       wx.showToast({ title: (this as any).$t('noteDetail.generateFail'), icon: 'none' });
     } finally {
-      this._shareTasks = [];
       this._safeSetData({ _generatingShare: false });
     }
   },

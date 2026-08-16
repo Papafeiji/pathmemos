@@ -28,6 +28,7 @@ Page({
   openTutorial1() { openUrl(`${getHelpBaseURL()}/tutorial/tutorial1/`); },
   openTutorial2() { openUrl(`${getHelpBaseURL()}/tutorial/tutorial2/`); },
   openTutorial3() { openUrl(`${getHelpBaseURL()}/tutorial/tutorial3/`); },
+  openTutorial4() { openUrl(`${getHelpBaseURL()}/tutorial/tutorial4/`); },
   openTutorial5() { openUrl(`${getHelpBaseURL()}/tutorial/tutorial5/`); },
   openTutorial6() { openUrl(`${getHelpBaseURL()}/tutorial/tutorial6/`); },
   openTutorial7() { openUrl(`${getHelpBaseURL()}/tutorial/tutorial7/`); },

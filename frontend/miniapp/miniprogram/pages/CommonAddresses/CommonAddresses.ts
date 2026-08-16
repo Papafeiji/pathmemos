@@ -16,7 +16,6 @@ Page({
   data: {
     addresses: [] as CommonAddress[],
     loading: false,
-    editingIndex: -1,
     editingName: '',
     tempName: '',
     showEditDrawer: false,
@@ -33,7 +32,8 @@ Page({
   onShow() {
     (this as any)._isDestroyed = false;
     (this as any)._isHidden = false;
-    this.fetchAddresses();
+    // 防重：快速进出页面会并发重复触发较重的聚类刷新。
+    if (!(this as any).data.loading) this.fetchAddresses();
   },
 
   onHide() {
@@ -64,6 +64,12 @@ Page({
       logger.error('fetch common addresses failed', e);
       (this as any)._safeSetData({ loading: false });
       wx.showToast({ title: (this as any).$t('commonAddresses.loadFail'), icon: 'none' });
+    } finally {
+      // R4：兜底复位 loading——任何提前返回路径都不让它卡在 true，
+      // 否则 onShow 的防重判断会永久跳过后续刷新。
+      if (!(this as any)._isDestroyed && (this as any).data.loading) {
+        (this as any)._safeSetData({ loading: false });
+      }
     }
   },
 
@@ -72,7 +78,6 @@ Page({
     const addr = this.data.addresses[index];
     if (!addr) return;
     (this as any)._safeSetData({
-      editingIndex: index,
       editingName: addr.name,
       tempName: addr.name,
       showEditDrawer: true,
@@ -91,8 +96,7 @@ Page({
   hiddenEditDrawer() {
     (this as any)._safeSetData({
       showEditDrawer: false,
-      editingIndex: -1,
-      editingName: '',
+        editingName: '',
       tempName: '',
     });
   },

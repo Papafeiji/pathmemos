@@ -25,7 +25,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 
 	features := map[string]bool{
 		"ai":  cfg.AIAPIKey != "",
-		"mcp": true,
+		"mcp": cfg.MCPEnabled,
 	}
 
 	if cfg.DeploymentMode == "open" {

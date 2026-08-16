@@ -15,3 +15,15 @@ func ToInterface(t pgtype.Text) interface{} {
 	}
 	return t.String
 }
+
+// AvatarURLOrDefault 返回头像 URL：有值返回原值；无值但有默认头像模板时返回模板+userID；否则 nil。
+// 统一 family/diary/invite 三处的重复实现（B4-17）。
+func AvatarURLOrDefault(avatar pgtype.Text, userID, defaultAvatarURL string) interface{} {
+	if !avatar.Valid || avatar.String == "" {
+		if defaultAvatarURL == "" {
+			return nil
+		}
+		return defaultAvatarURL + userID
+	}
+	return avatar.String
+}

@@ -2,9 +2,6 @@ package wxmp
 
 import (
 	"context"
-	"crypto/sha1"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/xml"
 	stderrors "errors"
 	"fmt"
@@ -13,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +19,7 @@ import (
 	"papafeiji/backend/internal/db"
 	"papafeiji/backend/internal/db/sqlc"
 	"papafeiji/backend/internal/pkg/safe"
+	"papafeiji/backend/internal/wechatcrypto"
 	"papafeiji/backend/pkg/util"
 
 	"github.com/go-chi/chi/v5"
@@ -47,6 +44,9 @@ const (
 
 	wxmpThumbCacheKey = "wxmp:thumb_media_id"
 	wxmpThumbCacheTTL = 48 * time.Hour
+
+	wxmpProfileRefreshKeyPrefix = "wxmp:profile:refresh:"
+	wxmpProfileRefreshTTL       = 1 * time.Hour
 )
 
 // Handler handles WeChat official account callbacks.
@@ -99,7 +99,7 @@ func (h *Handler) verifyServer(w http.ResponseWriter, r *http.Request) {
 	nonce := q.Get("nonce")
 	echostr := q.Get("echostr")
 
-	if CheckSignature(h.cfg.WechatMsgToken, signature, timestamp, nonce) {
+	if wechatcrypto.CheckSignature(h.cfg.WechatMsgToken, signature, timestamp, nonce) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		//nolint:errcheck
@@ -144,14 +144,14 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 加密模式必须校验 msg_signature，不允许回退到明文签名。
-		if !checkEncryptedSignature(h.cfg.WechatMsgToken, timestamp, nonce, enc.Encrypt, signature) {
+		if !wechatcrypto.CheckEncryptedSignature(h.cfg.WechatMsgToken, timestamp, nonce, enc.Encrypt, signature) {
 			slog.WarnContext(ctx, "invalid wx mp encrypted signature")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte("fail")) //nolint:errcheck
 			return
 		}
-		plainXML, appID, err := DecryptMsg(enc.Encrypt, h.cfg.WechatEncodingAESKey)
+		plainXML, appID, err := wechatcrypto.DecryptMsg(enc.Encrypt, h.cfg.WechatEncodingAESKey)
 		if err != nil {
 			slog.ErrorContext(ctx, "decrypt wx mp message failed", slog.Any("error", err))
 			writeXMLError(w)
@@ -170,7 +170,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		signature := q.Get("signature")
-		if !CheckSignature(h.cfg.WechatMsgToken, signature, timestamp, nonce) {
+		if !wechatcrypto.CheckSignature(h.cfg.WechatMsgToken, signature, timestamp, nonce) {
 			slog.WarnContext(ctx, "invalid wx mp callback signature")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusForbidden)
@@ -207,9 +207,9 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if (msgType == "text" || msgType == "voice") && msgID != "" {
 		duplicate, err := h.isDuplicateMessage(ctx, msgID)
 		if err != nil {
-			slog.ErrorContext(ctx, "check wx mp duplicate message failed", slog.String("msg_type", msgType), slog.String("msg_id", msgID), slog.String("openid", util.MaskID(fromOpenID)), slog.Any("error", err))
-			writeXMLError(w)
-			return
+			// 去重失败降级为继续处理（而非丢弃消息）：Redis 抖动不应导致用户消息被静默丢弃。
+			slog.WarnContext(ctx, "check wx mp duplicate message failed, fall through to process", slog.String("msg_type", msgType), slog.String("msg_id", msgID), slog.String("openid", util.MaskID(fromOpenID)), slog.Any("error", err))
+			duplicate = false
 		}
 		if duplicate {
 			// 重复消息返回非空占位，避免微信因空内容重试导致 AI 被重复触发。
@@ -247,18 +247,6 @@ func (h *Handler) writeReply(ctx context.Context, w http.ResponseWriter, toUser,
 	writeXML(w, encXML)
 }
 
-func checkEncryptedSignature(token, timestamp, nonce, encrypt, signature string) bool {
-	if token == "" || timestamp == "" || nonce == "" || encrypt == "" || signature == "" {
-		return false
-	}
-	arr := []string{token, timestamp, nonce, encrypt}
-	sort.Strings(arr)
-	h := sha1.New()
-	_, _ = h.Write([]byte(strings.Join(arr, "")))
-	expected := hex.EncodeToString(h.Sum(nil))
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) == 1
-}
-
 func (h *Handler) isDuplicateMessage(ctx context.Context, msgID string) (bool, error) {
 	if msgID == "" {
 		return false, nil
@@ -277,10 +265,14 @@ func (h *Handler) isDuplicateMessage(ctx context.Context, msgID string) (bool, e
 func (h *Handler) handleEvent(ctx context.Context, openID, event string) string {
 	switch event {
 	case "subscribe":
-		_, err := h.resolveUser(ctx, openID)
-		if err != nil {
-			slog.WarnContext(ctx, "resolve user on subscribe failed", slog.String("openid", util.MaskID(openID)), slog.Any("error", err))
-		}
+		// resolveUser 可能含微信 FetchUserInfo HTTP，同步执行会超过微信 5s 被动回复窗口；
+		// 移到后台执行，先立即返回欢迎语，避免微信重试导致重复处理。
+		safe.Go(context.WithoutCancel(ctx), nil, func() {
+			bgCtx := context.WithoutCancel(ctx)
+			if _, err := h.resolveUser(bgCtx, openID); err != nil {
+				slog.WarnContext(bgCtx, "resolve user on subscribe failed", slog.String("openid", util.MaskID(openID)), slog.Any("error", err))
+			}
+		})
 		// 显式标记订阅状态，避免 resolveUser 走本地缓存路径时不更新 subscribed
 		if err := h.pool.Queries().UpdateWxMPAccountSubscribeStatus(ctx, sqlc.UpdateWxMPAccountSubscribeStatusParams{
 			MpOpenid:   openID,
@@ -589,6 +581,15 @@ func (h *Handler) resolveUser(ctx context.Context, openID string) (*sqlc.GetUser
 func (h *Handler) refreshMPAccountAsync(ctx context.Context, openID string) {
 	if !h.wxClient.IsConfigured() {
 		return
+	}
+	// 节流：同一 openID 每 1 小时最多异步刷新一次微信资料，避免每条消息都打微信 FetchUserInfo。
+	if h.rdb != nil {
+		ok, err := h.rdb.SetNX(ctx, wxmpProfileRefreshKeyPrefix+openID, "1", wxmpProfileRefreshTTL).Result()
+		if err != nil {
+			slog.WarnContext(ctx, "wxmp profile refresh throttle check failed", slog.String("openid", util.MaskID(openID)), slog.Any("error", err))
+		} else if !ok {
+			return
+		}
 	}
 	safe.Go(ctx, nil, func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

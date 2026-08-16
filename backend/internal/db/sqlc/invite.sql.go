@@ -208,9 +208,12 @@ const resolveInviterFromCode = `-- name: ResolveInviterFromCode :one
 UPDATE user_invite_codes
 SET used_at = now()
 WHERE short_code = $1
+  AND (expires_at IS NULL OR expires_at > now())
 RETURNING user_id
 `
 
+// 邀请码是邀请人的稳定分享码，可被多个被邀请人多次解析（不限制一次性），
+// 仅接线 000012 迁移引入的过期特性：过期后解析失败。
 func (q *Queries) ResolveInviterFromCode(ctx context.Context, shortCode string) (string, error) {
 	row := q.db.QueryRow(ctx, resolveInviterFromCode, shortCode)
 	var user_id string

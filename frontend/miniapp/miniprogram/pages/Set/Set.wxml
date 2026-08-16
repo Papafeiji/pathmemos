@@ -38,6 +38,9 @@
         bindtap="tapPhoneCell"
       ></button>
     </view>
+    <Cell wx:if="{{!isPrivateBackend && phone}}" showArrow bindtap="onUnbindPhoneTap">
+      {{_i18n['set.unbindPhone']}}
+    </Cell>
     <Cell wx:if="{{!isPrivateBackend}}" showArrow="{{!mpSubscribed}}" suffix="{{mpSubscribed ? _i18n['set.serviceAccountBound'] : _i18n['set.serviceAccountUnbound']}}" bindtap="onServiceAccountTap">
       {{_i18n['set.bindServiceAccount']}}
     </Cell>
@@ -123,5 +126,17 @@
       </view>
     </view>
   </Drawer>
+
+  <ConfirmDialog
+    visible="{{confirmDialog.visible}}"
+    title="{{confirmDialog.title || ''}}"
+    content="{{confirmDialog.content || ''}}"
+    cancelText="{{confirmDialog.cancelText || ''}}"
+    confirmText="{{confirmDialog.confirmText || ''}}"
+    confirmType="{{confirmDialog.confirmType}}"
+    bind:cancel="onConfirmDialogCancel"
+    bind:confirm="onConfirmDialogConfirm"
+    bind:close="onConfirmDialogCancel"
+  />
 </view>
 

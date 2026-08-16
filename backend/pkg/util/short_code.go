@@ -2,6 +2,7 @@ package util
 
 import (
 	"crypto/rand"
+	"errors"
 	"math/big"
 )
 
@@ -10,6 +11,9 @@ const ShortCodeChars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 // NewShortCode 生成指定长度的随机短码。
 func NewShortCode(length int) (string, error) {
+	if length <= 0 {
+		return "", errors.New("short code length must be positive")
+	}
 	chars := []rune(ShortCodeChars)
 	max := big.NewInt(int64(len(chars)))
 	b := make([]rune, length)

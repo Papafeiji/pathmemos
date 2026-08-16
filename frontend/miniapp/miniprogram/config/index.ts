@@ -1,15 +1,19 @@
 
 
 
-
-
 import { STORAGE_KEY_MODE } from '../utils/storage';
 
 const SAAS_BASE_URL = 'https://pro.papafeiji.cn';
 export const WORKER_BASE_URL = 'https://api.pathmemos.com';
 const DEV_BASE_URL = 'http://localhost:8080';
 
-const envVersion = (wx as any).getAccountInfoSync().miniProgram.envVersion;
+// 模块加载期调用 wx 能力需带守卫：无 wx 环境（Node 单测等）import 不应崩溃。
+let envVersion = 'release';
+try {
+  envVersion = (wx as any).getAccountInfoSync().miniProgram.envVersion;
+} catch (_err) {
+  // 默认按 release 处理
+}
 const isDevelop = envVersion === 'develop';
 
 // 阶段二：用户可在设置页切换为 'private'，经 Cloudflare Worker 路由到私有化后端。
@@ -33,6 +37,11 @@ export function getSSEBaseURL(): string {
   return getBaseURL();
 }
 
+// 兼容旧代码：模块加载时计算一次，动态切换请使用 getBaseURL()/getSSEBaseURL()
+// 注意：不要在新代码中直接使用这两个常量，否则用户切换后端模式后不会更新。
+export const BASE_URL = getBaseURL();
+export const SSE_BASE_URL = getSSEBaseURL();
+
 
 
 
@@ -52,3 +61,6 @@ const SAAS_HELP_BASE = 'https://papafeiji.cn';
 export function getHelpBaseURL(): string {
   return SAAS_HELP_BASE;
 }
+
+// 分享导出引导笔记链接（运营可整体替换，避免页面内硬编码死链）。
+export const EXPORT_GUIDE_URL = 'https://www.xiaohongshu.com/explore/66362ab7000000001e038b66';

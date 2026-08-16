@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"papafeiji/backend/internal/config"
+	"papafeiji/backend/pkg/util"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -88,7 +89,7 @@ func (c *Client) GetAccessToken(ctx context.Context) (string, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request mp access token: %w", err)
+		return "", util.SanitizeURLError(fmt.Errorf("request mp access token: %w", err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -147,7 +148,7 @@ func (c *Client) FetchUserInfo(ctx context.Context, openID string) (*UserInfo, e
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request mp user info: %w", err)
+		return nil, util.SanitizeURLError(fmt.Errorf("request mp user info: %w", err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -225,7 +226,7 @@ func (c *Client) UploadTempMedia(ctx context.Context, mediaType, filename string
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request upload media: %w", err)
+		return "", util.SanitizeURLError(fmt.Errorf("request upload media: %w", err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -310,7 +311,7 @@ func (c *Client) SendMiniProgramPage(ctx context.Context, openID, appID, pagePat
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request mini program page: %w", err)
+		return util.SanitizeURLError(fmt.Errorf("request mini program page: %w", err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -368,7 +369,7 @@ func (c *Client) SendKfMessage(ctx context.Context, openID, content string) erro
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request kf message: %w", err)
+		return util.SanitizeURLError(fmt.Errorf("request kf message: %w", err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 

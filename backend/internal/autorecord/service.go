@@ -229,35 +229,50 @@ func (s *Service) processUser(ctx context.Context, userID string) (err error) {
 			continue
 		}
 
-		landmark, address, err := s.reverseGeocode(ctx, lat.Float64, lon.Float64)
+		// 先匹配常用地址：命中时直接用其名称生成条目，跳过腾讯逆地理编码
+		// （省配额与延迟），且地图服务暂时不可用时常用地址仍可生成条目。
+		landmark := ""
+		address := ""
 		if addr := s.matchCommonAddress(commonAddrs, lat.Float64, lon.Float64); addr != nil {
 			landmark = addr.Name
-		}
-		if err != nil {
-			if s.handleGeocodeRetry(ctx, rows, cluster.ids, userID) {
-				toDelete = append(toDelete, cluster.ids...)
-			}
-			slog.ErrorContext(ctx, "auto record reverse geocode failed, skip cluster",
+		} else if !location.CheckReverseQuota(ctx, s.rdb, userID) {
+			// 每用户日配额已用尽（或 Redis 不可用，fail-closed）：跳过逆地理编码，
+			// cluster 留待下轮重试，避免耗尽腾讯地图 key 影响全站交互接口。
+			slog.WarnContext(ctx, "auto record reverse geocode quota exhausted, skip cluster",
 				slog.String("user_id", userID),
 				slog.Int("index", idx),
-				slog.Float64("lat", lat.Float64),
-				slog.Float64("lon", lon.Float64),
-				slog.String("traj_id", sp.ID),
-				slog.Any("error", err))
+				slog.String("traj_id", sp.ID))
 			continue
-		}
-		if address == "" {
-			if s.handleGeocodeRetry(ctx, rows, cluster.ids, userID) {
-				toDelete = append(toDelete, cluster.ids...)
+		} else {
+			var geocodeErr error
+			landmark, address, geocodeErr = s.reverseGeocode(ctx, lat.Float64, lon.Float64)
+			if geocodeErr != nil {
+				if s.handleGeocodeRetry(ctx, rows, cluster.ids, userID) {
+					toDelete = append(toDelete, cluster.ids...)
+				}
+				slog.ErrorContext(ctx, "auto record reverse geocode failed, skip cluster",
+					slog.String("user_id", userID),
+					slog.Int("index", idx),
+					slog.Float64("lat", lat.Float64),
+					slog.Float64("lon", lon.Float64),
+					slog.String("traj_id", sp.ID),
+					slog.Any("error", geocodeErr))
+				continue
 			}
-			slog.WarnContext(ctx, "auto record reverse geocode returned empty address, skip cluster",
-				slog.String("user_id", userID),
-				slog.Int("index", idx),
-				slog.Float64("lat", lat.Float64),
-				slog.Float64("lon", lon.Float64),
-				slog.String("traj_id", sp.ID),
-				slog.String("landmark", landmark))
-			continue
+			// 空地址但返回了 landmark（POI）时降级用 landmark 生成条目，
+			// 避免偏远地区/海外坐标在 10 轮重试后被静默删轨迹。
+			if address == "" && landmark == "" {
+				if s.handleGeocodeRetry(ctx, rows, cluster.ids, userID) {
+					toDelete = append(toDelete, cluster.ids...)
+				}
+				slog.WarnContext(ctx, "auto record reverse geocode returned empty address, skip cluster",
+					slog.String("user_id", userID),
+					slog.Int("index", idx),
+					slog.Float64("lat", lat.Float64),
+					slog.Float64("lon", lon.Float64),
+					slog.String("traj_id", sp.ID))
+				continue
+			}
 		}
 
 		recordTime := sp.RecordedAt
@@ -489,6 +504,8 @@ func (s *Service) mergeStayPoints(rows []sqlc.AutoRecordTrajectory) ([]stayPoint
 			ids:            []string{rows[i].ID},
 			latSum:         lat,
 			lonSum:         lon,
+			lastLat:        lat,
+			lastLon:        lon,
 			count:          1,
 		}
 	}
@@ -535,8 +552,8 @@ func uniqueStrings(ss []string) []string {
 // IsSameAsLastAutoEntry 检查当前驻点是否与指定日期当天最后一条自动记录重复。
 // last 为 nil 时会按日期查询；调用方可传入缓存的当天最后一条以减少查询。
 func IsSameAsLastAutoEntry(ctx context.Context, pool *db.Pool, userID string, landmark, address string, recordDate pgtype.Date, last *sqlc.GetUserLastAutoEntryByDateRow) (entryID string, ok bool, err error) {
-	current := last
-	if last == nil || last.ID == "" {
+	var current *sqlc.GetUserLastAutoEntryByDateRow
+	if last == nil {
 		queried, err := pool.Queries().GetUserLastAutoEntryByDate(ctx, sqlc.GetUserLastAutoEntryByDateParams{
 			CreatedBy:  userID,
 			RecordDate: recordDate,
@@ -548,10 +565,12 @@ func IsSameAsLastAutoEntry(ctx context.Context, pool *db.Pool, userID string, la
 			}
 			return "", false, nil
 		}
-		if last != nil {
-			*last = queried
-		}
 		current = &queried
+	} else if last.ID == "" {
+		// B4-05：调用方已缓存“当天无自动记录”的零值哨兵，直接返回不重复，避免重复查库。
+		return "", false, nil
+	} else {
+		current = last
 	}
 	if current == nil || current.ID == "" {
 		return "", false, nil
@@ -604,7 +623,7 @@ func (s *Service) matchCommonAddress(addrs []sqlc.ListUserCommonAddressesRow, la
 }
 
 // flatDistanceMetersSq 返回平面距离的平方（米²）。
-// 在 200m 聚类半径内，平面近似误差远小于 1m，且避免 haversine 的 sin/cos/sqrt 开销。
+// 在 300m 聚类半径（stayPointMergeRadiusM）内，平面近似误差远小于 1m，且避免 haversine 的 sin/cos/sqrt 开销。
 func flatDistanceMetersSq(lat1, lon1, lat2, lon2 float64) float64 {
 	const metersPerDegLat = 111320.0
 	avgLat := (lat1 + lat2) * 0.5 * math.Pi / 180
@@ -630,7 +649,13 @@ func (s *Service) handleGeocodeRetry(ctx context.Context, rows []sqlc.AutoRecord
 	}
 	for _, row := range rows {
 		if _, ok := clusterSet[row.ID]; ok && row.GeocodeAttempts >= maxGeocodeAttempts {
-			return true
+			// 达到重试上限不删除轨迹：暂时性故障（腾讯 API 宕机/配额耗尽）恢复后仍可
+			// 生成驻点；轨迹由 7 天清理窗口（runCleanupTrajectories）统一回收，避免数据永久丢失。
+			slog.WarnContext(ctx, "auto record geocode retry limit reached, keep trajectory",
+				slog.String("user_id", userID),
+				slog.String("traj_id", row.ID),
+				slog.Int64("attempts", int64(row.GeocodeAttempts)))
+			return false
 		}
 	}
 	if incErr := s.pool.Queries().IncrementTrajectoryGeocodeAttempts(ctx, clusterIDs); incErr != nil {

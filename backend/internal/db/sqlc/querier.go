@@ -17,6 +17,10 @@ type Querier interface {
 	BatchUpdateUsersCurrentFamilyToPersonal(ctx context.Context, arg BatchUpdateUsersCurrentFamilyToPersonalParams) error
 	BatchUpsertFamilyMembership(ctx context.Context, arg BatchUpsertFamilyMembershipParams) error
 	BatchUpsertFamilyMembershipOwner(ctx context.Context, arg BatchUpsertFamilyMembershipOwnerParams) error
+	// 并发首次激活竞态防护：GetUserVIPForUpdate 对不存在的行无法加锁，两个并发首次激活
+	// 都走 ErrNoRows 创建路径会各自按 now 计算 expire、GREATEST 只保留较大者导致较小档时长丢失。
+	// 先 ON CONFLICT DO NOTHING 占位（expire=now），再 FOR UPDATE 重读串行化首次创建。
+	ClaimUserVIPRow(ctx context.Context, arg ClaimUserVIPRowParams) error
 	ClearAvatarReferencesToOrphanFiles(ctx context.Context) error
 	ClearFamilyDailyImageCoverByFileID(ctx context.Context, arg ClearFamilyDailyImageCoverByFileIDParams) error
 	ClearFamilyDailyImageCoverByFileIDs(ctx context.Context, arg ClearFamilyDailyImageCoverByFileIDsParams) error
@@ -26,6 +30,8 @@ type Querier interface {
 	ClearTrajectoryFamilyID(ctx context.Context, familyID string) error
 	ClearUserAvatarByFile(ctx context.Context, arg ClearUserAvatarByFileParams) error
 	CloseOrder(ctx context.Context, arg CloseOrderParams) (int64, error)
+	// 两个数组按位置配对（B2-10）：out_trade_nos 展开为 (订单号, 序号)，
+	// user_ids 按下标取同位置的 user_id，避免双 ANY 独立展开产生笛卡尔误关他人订单。
 	CloseOrdersBatch(ctx context.Context, arg CloseOrdersBatchParams) (int64, error)
 	ClosePendingOrdersByUser(ctx context.Context, userID pgtype.Text) error
 	ClosePendingOrdersByUserAndVIP(ctx context.Context, arg ClosePendingOrdersByUserAndVIPParams) error
@@ -50,15 +56,20 @@ type Querier interface {
 	CreateUserInvite(ctx context.Context, arg CreateUserInviteParams) (UserInvite, error)
 	CreateUserInviteCode(ctx context.Context, arg CreateUserInviteCodeParams) (UserInviteCode, error)
 	DecrementAIDailyQuotaUsed(ctx context.Context, arg DecrementAIDailyQuotaUsedParams) (int32, error)
+	// GREATEST 保底：并发/重复扣减时计量不得为负（负值会绕过存储限额检查）。
+	DecrementUserImageStorage(ctx context.Context, arg DecrementUserImageStorageParams) error
 	DeleteAIDailyQuotaUsageByUserID(ctx context.Context, userID string) error
 	DeleteAPIKeyByUser(ctx context.Context, userID string) error
-	// 在事务内先锁定日记行、再删除图片关联并返回 file_id，最后删除日记（级联删除条目）。
-	// FOR UPDATE 阻止并发创建条目，确保返回的 file_id 与实际被级联删除的图片完全一致。
-	DeleteDiaryAndEntriesReturningFileIDs(ctx context.Context, id string) ([]string, error)
+	DeleteDiaryByID(ctx context.Context, id string) error
+	DeleteDiaryEntryByID(ctx context.Context, id string) error
 	DeleteDiaryEntryImages(ctx context.Context, diaryEntryID string) error
-	// 在事务内锁定条目行、删除图片关联并返回 file_id，最后删除日记条目。
-	// FOR UPDATE 阻止并发更新条目，确保返回的 file_id 与实际被级联删除的图片完全一致。
-	DeleteDiaryEntryReturningFileIDs(ctx context.Context, id string) ([]string, error)
+	// 先删图片关联并返回 file_id，再由调用方在同一事务内删除条目。
+	// 拆成两条语句，避免数据修改 CTE 顺序不可预测导致 file_id 漏返回。
+	DeleteDiaryEntryImagesReturningFileIDs(ctx context.Context, diaryEntryID string) ([]string, error)
+	// 先删图片关联并返回 file_id，再由调用方在同一事务内删除日记（级联删除条目）。
+	// 拆成两条语句：PostgreSQL 不保证同一 WITH 内多个数据修改 CTE 的执行顺序，
+	// 若级联（删日记）先于显式 DELETE...RETURNING 执行，file_id 会为空导致文件漏清理。
+	DeleteDiaryImagesReturningFileIDs(ctx context.Context, diaryID string) ([]string, error)
 	DeleteExcessDialogLogs(ctx context.Context, arg DeleteExcessDialogLogsParams) (int64, error)
 	DeleteExpiredAPIKeys(ctx context.Context, dollar_1 int64) (int64, error)
 	DeleteFamily(ctx context.Context, id string) error
@@ -73,6 +84,7 @@ type Querier interface {
 	DeleteTrajectories(ctx context.Context, dollar_1 []string) error
 	DeleteTrajectoryCovers(ctx context.Context, arg DeleteTrajectoryCoversParams) error
 	DeleteUser(ctx context.Context, id string) error
+	DeleteUserCommonAddressByName(ctx context.Context, arg DeleteUserCommonAddressByNameParams) error
 	DeleteUserCommonAddresses(ctx context.Context, userID string) error
 	DeleteUserInviteCodeByUserID(ctx context.Context, userID string) error
 	DeleteUserVIP(ctx context.Context, userID string) error
@@ -107,6 +119,8 @@ type Querier interface {
 	GetUserByOpenID(ctx context.Context, openID string) (GetUserByOpenIDRow, error)
 	GetUserByUnionID(ctx context.Context, unionid pgtype.Text) (GetUserByUnionIDRow, error)
 	GetUserCommonAddress(ctx context.Context, arg GetUserCommonAddressParams) (GetUserCommonAddressRow, error)
+	GetUserCommonAddressForUpdate(ctx context.Context, arg GetUserCommonAddressForUpdateParams) (GetUserCommonAddressForUpdateRow, error)
+	GetUserImageStorageUsage(ctx context.Context, id string) (int64, error)
 	GetUserInviteByUserID(ctx context.Context, userID string) (UserInvite, error)
 	GetUserInviteCode(ctx context.Context, userID string) (string, error)
 	GetUserLastAutoEntry(ctx context.Context, createdBy string) (GetUserLastAutoEntryRow, error)
@@ -121,6 +135,8 @@ type Querier interface {
 	HasVIPClaim(ctx context.Context, arg HasVIPClaimParams) (bool, error)
 	IncrementAIDailyQuotaUsed(ctx context.Context, arg IncrementAIDailyQuotaUsedParams) (IncrementAIDailyQuotaUsedRow, error)
 	IncrementTrajectoryGeocodeAttempts(ctx context.Context, dollar_1 []string) error
+	// B5-12：条件原子扣减——超限时更新 0 行，由调用方识别拒绝，杜绝 check-then-act 竞态。
+	IncrementUserImageStorage(ctx context.Context, arg IncrementUserImageStorageParams) (int64, error)
 	InsertAIDialogLog(ctx context.Context, arg InsertAIDialogLogParams) error
 	InsertTrajectories(ctx context.Context, arg InsertTrajectoriesParams) error
 	InsertUserCommonAddresses(ctx context.Context, arg InsertUserCommonAddressesParams) error
@@ -135,6 +151,7 @@ type Querier interface {
 	ListDiaryCards(ctx context.Context, arg ListDiaryCardsParams) ([]ListDiaryCardsRow, error)
 	ListDiaryCardsByDates(ctx context.Context, arg ListDiaryCardsByDatesParams) ([]ListDiaryCardsByDatesRow, error)
 	ListDiaryEntries(ctx context.Context, arg ListDiaryEntriesParams) ([]ListDiaryEntriesRow, error)
+	// 排序与展示列同源：record_time 被编辑后结果顺序仍与展示值一致。
 	ListDiaryEntriesByDateRange(ctx context.Context, arg ListDiaryEntriesByDateRangeParams) ([]ListDiaryEntriesByDateRangeRow, error)
 	ListDiaryEntryImageFileIDsByDiaryID(ctx context.Context, diaryID string) ([]string, error)
 	ListDiaryEntryImagePaths(ctx context.Context, diaryEntryID string) ([]ListDiaryEntryImagePathsRow, error)
@@ -144,10 +161,13 @@ type Querier interface {
 	ListFamilyMemberPersonalFamilies(ctx context.Context, familyID string) ([]ListFamilyMemberPersonalFamiliesRow, error)
 	ListFamilyMembers(ctx context.Context, familyID string) ([]ListFamilyMembersRow, error)
 	ListFilesByCreator(ctx context.Context, arg ListFilesByCreatorParams) ([]ListFilesByCreatorRow, error)
+	// B2-12：按地址批量取最新坐标（DISTINCT ON），替代循环内逐条 N+1 查询。
+	ListLatestCoordinatesByAddresses(ctx context.Context, arg ListLatestCoordinatesByAddressesParams) ([]ListLatestCoordinatesByAddressesRow, error)
 	ListLocationEntries(ctx context.Context, arg ListLocationEntriesParams) ([]ListLocationEntriesRow, error)
 	ListMemoriesByDateRange(ctx context.Context, arg ListMemoriesByDateRangeParams) ([]ListMemoriesByDateRangeRow, error)
 	ListMemoriesByUserAndDate(ctx context.Context, arg ListMemoriesByUserAndDateParams) ([]ListMemoriesByUserAndDateRow, error)
 	ListOrphanFilesByCreator(ctx context.Context, arg ListOrphanFilesByCreatorParams) ([]ListOrphanFilesByCreatorRow, error)
+	// B2-13：以聚合 JOIN 替代 EXISTS + 相关子查询计数，避免每行重复扫描轨迹表。
 	ListPendingAutoRecordUsers(ctx context.Context, limit int32) ([]string, error)
 	ListPendingOrdersBefore(ctx context.Context, arg ListPendingOrdersBeforeParams) ([]Order, error)
 	ListRecentDialogLogs(ctx context.Context, arg ListRecentDialogLogsParams) ([]AiDialogLog, error)
@@ -157,18 +177,24 @@ type Querier interface {
 	ListUserInviteQRCodeFiles(ctx context.Context, arg ListUserInviteQRCodeFilesParams) ([]ListUserInviteQRCodeFilesRow, error)
 	ListUserInvitesByInviter(ctx context.Context, inviterID string) ([]ListUserInvitesByInviterRow, error)
 	ListUserMcpEntries(ctx context.Context, arg ListUserMcpEntriesParams) ([]ListUserMcpEntriesRow, error)
+	// keyset 游标分页：按 created_by 排序 + 游标 + LIMIT，避免一次性物化全部变更用户。
 	ListUsersWithDiaryChangesSince(ctx context.Context, arg ListUsersWithDiaryChangesSinceParams) ([]string, error)
 	ListUsersWithExcessDialogLogs(ctx context.Context, arg ListUsersWithExcessDialogLogsParams) ([]string, error)
 	LockInviterReward(ctx context.Context, dollar_1 pgtype.Text) error
 	MarkAbnormalAlertSent(ctx context.Context, id string) (int64, error)
 	MarkInviteeRewarded(ctx context.Context, id string) (int64, error)
 	MarkInviterRewarded(ctx context.Context, id string) (int64, error)
+	// B2-09：upsert 目标行（源行坐标/计数随 INSERT 带入），目标行不存在时计数不再静默丢失；
+	// ON CONFLICT 保证并发合并计数不丢。源行删除由 DeleteUserCommonAddressByName 在调用方事务内完成
+	// （H2：sqlc 会静默丢弃同一 named 块中的第二条语句，不可合并写在这里）。
 	MergeUserCommonAddress(ctx context.Context, arg MergeUserCommonAddressParams) error
 	MigrateFamilyDailyCovers(ctx context.Context, arg MigrateFamilyDailyCoversParams) error
 	MigrateUserDailyCoversToFamily(ctx context.Context, arg MigrateUserDailyCoversToFamilyParams) error
 	NeedsCommonAddressRefresh(ctx context.Context, userID string) (pgtype.Bool, error)
 	NullifyOrdersByUser(ctx context.Context, userID pgtype.Text) error
 	RenameUserCommonAddress(ctx context.Context, arg RenameUserCommonAddressParams) error
+	// 邀请码是邀请人的稳定分享码，可被多个被邀请人多次解析（不限制一次性），
+	// 仅接线 000012 迁移引入的过期特性：过期后解析失败。
 	ResolveInviterFromCode(ctx context.Context, shortCode string) (string, error)
 	ScanOldSystemFiles(ctx context.Context, id string) ([]ScanOldSystemFilesRow, error)
 	ScanOrphanFiles(ctx context.Context, id string) ([]ScanOrphanFilesRow, error)
@@ -178,12 +204,15 @@ type Querier interface {
 	UpdateDiaryEntriesAddress(ctx context.Context, arg UpdateDiaryEntriesAddressParams) (int64, error)
 	UpdateDiaryEntriesAddressBatch(ctx context.Context, arg UpdateDiaryEntriesAddressBatchParams) (int64, error)
 	UpdateDiaryEntry(ctx context.Context, arg UpdateDiaryEntryParams) (int64, error)
+	// B2-08：参数按使用顺序连续编号，避免 $6 跳跃误导。
 	UpdateMemory(ctx context.Context, arg UpdateMemoryParams) (Memory, error)
 	UpdateOrderPaid(ctx context.Context, arg UpdateOrderPaidParams) (int64, error)
 	UpdateUserAlertSubscribe(ctx context.Context, arg UpdateUserAlertSubscribeParams) error
 	UpdateUserAutoRecord(ctx context.Context, arg UpdateUserAutoRecordParams) error
 	UpdateUserAvatar(ctx context.Context, arg UpdateUserAvatarParams) error
 	UpdateUserCurrentFamily(ctx context.Context, arg UpdateUserCurrentFamilyParams) error
+	// 仅当尚无邀请人时写入（登录后补绑场景的幂等闸门，R4）。
+	UpdateUserInvitedBy(ctx context.Context, arg UpdateUserInvitedByParams) (int64, error)
 	UpdateUserLang(ctx context.Context, arg UpdateUserLangParams) error
 	UpdateUserLastActiveAt(ctx context.Context, id string) error
 	UpdateUserNickname(ctx context.Context, arg UpdateUserNicknameParams) error

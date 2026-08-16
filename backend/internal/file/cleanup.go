@@ -47,6 +47,17 @@ func DeleteFile(ctx context.Context, pool *db.Pool, storage *Storage, fileID, us
 			return fmt.Errorf("delete file record: %w", err)
 		}
 
+		if file.FileType == "image" && file.CreatedBy.Valid && file.CreatedBy.String != "" {
+			// 扣减失败须回滚整个事务：否则 files 记录已删、image_storage_bytes 未回退，
+			// 幽灵字节永久占用用户配额，且孤儿清理任务无法补偿。
+			if decErr := q.DecrementUserImageStorage(ctx, sqlc.DecrementUserImageStorageParams{
+				ID:                file.CreatedBy.String,
+				ImageStorageBytes: file.SizeBytes,
+			}); decErr != nil {
+				return fmt.Errorf("decrement user image storage: %w", decErr)
+			}
+		}
+
 		physicalPath = file.Path
 		physicalStorageType = file.StorageType
 		return nil
@@ -84,6 +95,17 @@ func DeletePhysicalIfUnreferenced(ctx context.Context, pool *db.Pool, storage *S
 
 		if err := q.DeleteFile(ctx, fileID); err != nil {
 			return fmt.Errorf("delete file record: %w", err)
+		}
+
+		if file.FileType == "image" && file.CreatedBy.Valid && file.CreatedBy.String != "" {
+			// 扣减失败须回滚整个事务：否则 files 记录已删、image_storage_bytes 未回退，
+			// 幽灵字节永久占用用户配额，且孤儿清理任务无法补偿。
+			if decErr := q.DecrementUserImageStorage(ctx, sqlc.DecrementUserImageStorageParams{
+				ID:                file.CreatedBy.String,
+				ImageStorageBytes: file.SizeBytes,
+			}); decErr != nil {
+				return fmt.Errorf("decrement user image storage: %w", decErr)
+			}
 		}
 
 		physicalPath = file.Path

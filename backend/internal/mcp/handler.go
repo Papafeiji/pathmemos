@@ -318,38 +318,44 @@ func (h *Handler) RotateKey(w http.ResponseWriter, r *http.Request) {
 	h.respondWithAPIKey(w, r, rawKey, expiresAt)
 }
 
+//nolint:dupl // 与 ListMemories 共用 authenticateMcpQuery 后的查询-响应尾部，结构重复可读性优先
 func (h *Handler) GetDiary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	if !h.rateLimiter.Allow(r) {
-		middleware.JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "too many requests")
-		return
-	}
-	key, err := h.authenticateAPIKey(ctx, extractBearer(r.Header.Get("Authorization")))
-	if err != nil {
-		middleware.JSONError(w, r, http.StatusUnauthorized, errors.CodeUnauthorized, "invalid api key")
+	key, startDate, endDate, limit, ok := h.authenticateMcpQuery(w, r)
+	if !ok {
 		return
 	}
 
-	startDate, endDate, err := parseMcpDateRange(r)
-	if err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, err.Error())
-		return
-	}
-
-	limit := parseMcpLimit(r)
 	rows, err := h.listUserDiaryEntries(ctx, key.userID, startDate, endDate, limit)
 	if err != nil {
 		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to list diaries")
 		return
 	}
 
-	data := buildMcpDiaryResponse(rows)
-	if err := checkMcpResponseSize(map[string]interface{}{"data": data}); err != nil {
-		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "response too large")
-		return
+	data, truncated := buildMcpDiaryResponse(rows)
+	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{"data": data, "truncated": truncated})
+}
+
+// authenticateMcpQuery 是查询类端点的公共前奏：限流 + API Key 鉴权 + 日期范围与 limit 解析。
+func (h *Handler) authenticateMcpQuery(w http.ResponseWriter, r *http.Request) (key apiKeyInfo, startDate, endDate time.Time, limit int, ok bool) {
+	if !h.rateLimiter.Allow(r) {
+		middleware.JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "too many requests")
+		return key, startDate, endDate, limit, false
 	}
-	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{"data": data})
+	var err error
+	key, err = h.authenticateAPIKey(r.Context(), extractBearer(r.Header.Get("Authorization")))
+	if err != nil {
+		middleware.JSONError(w, r, http.StatusUnauthorized, errors.CodeUnauthorized, "invalid api key")
+		return key, startDate, endDate, limit, false
+	}
+	startDate, endDate, err = parseMcpDateRange(r)
+	if err != nil {
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, err.Error())
+		return key, startDate, endDate, limit, false
+	}
+	limit = parseMcpLimit(r)
+	return key, startDate, endDate, limit, true
 }
 
 func (h *Handler) listUserDiaryEntries(ctx context.Context, userID string, startDate, endDate time.Time, limit int) ([]sqlc.ListUserMcpEntriesRow, error) {
@@ -374,7 +380,10 @@ func (h *Handler) listUserDiaryEntries(ctx context.Context, userID string, start
 			return nil, fmt.Errorf("list user mcp entries: %w", err)
 		}
 		if data, err := json.Marshal(rows); err == nil {
-			_ = h.rdb.Set(ctx, key, data, mcpCacheTTL).Err() //nolint:errcheck
+			// 超大结果不入缓存，避免 Redis 内存被大 payload 撑爆。
+			if len(data) <= maxMcpMessageSize {
+				_ = h.rdb.Set(ctx, key, data, mcpCacheTTL).Err() //nolint:errcheck
+			}
 		}
 		return rows, nil
 	}
@@ -393,7 +402,8 @@ func (h *Handler) listUserDiaryEntries(ctx context.Context, userID string, start
 func parseMcpLimit(r *http.Request) int {
 	limit := defaultMcpPageSize
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+		// limit=0 视为合法（返回空结果），仅负值/非法值回落默认。
+		if l, err := strconv.Atoi(limitStr); err == nil && l >= 0 {
 			limit = l
 		}
 	}
@@ -436,11 +446,16 @@ func parseMcpDateRange(r *http.Request) (time.Time, time.Time, error) {
 	return startDate, endDate, nil
 }
 
-func buildMcpDiaryResponse(rows []sqlc.ListUserMcpEntriesRow) []map[string]interface{} {
-	var data []map[string]interface{}
+// buildMcpDiaryResponse 以字节预算增量构造响应：超过预算即停止追加条目并标记 truncated，
+// 避免大文本日期范围先完整构造（每请求数十 MB 内存峰值）再整体拒绝。
+func buildMcpDiaryResponse(rows []sqlc.ListUserMcpEntriesRow) ([]map[string]interface{}, bool) {
+	const budgetBytes = maxMcpMessageSize * 4 / 5 // 预留外层 JSON 包装余量
+	data := make([]map[string]interface{}, 0)     // 空结果返回 [] 而非 null，保证列表契约
 	var currentDay map[string]interface{}
 	var currentDate string
 	var entries []map[string]interface{}
+	used := 0
+	truncated := false
 
 	flushDay := func() {
 		if currentDay != nil {
@@ -451,6 +466,12 @@ func buildMcpDiaryResponse(rows []sqlc.ListUserMcpEntriesRow) []map[string]inter
 	}
 
 	for _, row := range rows {
+		text := strings.TrimSpace(row.Text)
+		used += len(text) + len(row.Location) + 128
+		if used > budgetBytes {
+			truncated = true
+			break
+		}
 		dateKey := row.RecordDate.Time.Format("2006-01-02")
 		if dateKey != currentDate {
 			flushDay()
@@ -460,7 +481,6 @@ func buildMcpDiaryResponse(rows []sqlc.ListUserMcpEntriesRow) []map[string]inter
 				"recordDate": dateKey,
 			}
 		}
-		text := strings.TrimSpace(row.Text)
 		entries = append(entries, map[string]interface{}{
 			"time":     row.RecordAt.Time.In(timeutil.Shanghai).Format("2006年01月02日15时"),
 			"location": row.Location,
@@ -468,23 +488,12 @@ func buildMcpDiaryResponse(rows []sqlc.ListUserMcpEntriesRow) []map[string]inter
 		})
 	}
 	flushDay()
-	return data
+	return data, truncated
 }
 
 func hashKey(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:])
-}
-
-func checkMcpResponseSize(data interface{}) error {
-	raw, err := json.Marshal(data)
-	if err != nil {
-		return nil
-	}
-	if len(raw) > maxMcpMessageSize {
-		return fmt.Errorf("response too large")
-	}
-	return nil
 }
 
 type createMemoryRequest struct {
@@ -548,8 +557,8 @@ func parseCreateMemoryRequest(w http.ResponseWriter, r *http.Request) (createMem
 		return req, fmt.Errorf("标题最长 50 个字")
 	}
 	req.Content = strings.TrimSpace(req.Content)
-	if utf8.RuneCountInString(req.Content) > 10000 {
-		return req, fmt.Errorf("内容最长 10000 个字")
+	if req.Content == "" || utf8.RuneCountInString(req.Content) > 10000 {
+		return req, fmt.Errorf("内容需为 1-10000 个字")
 	}
 	return req, nil
 }
@@ -620,29 +629,18 @@ func InvalidateUserCache(ctx context.Context, rdb *redis.Client, userID string) 
 
 // invalidateMcpCache 删除当前 handler 关联用户的 MCP 查询缓存。
 func (h *Handler) invalidateMcpCache(ctx context.Context, userID string) {
-	InvalidateUserCache(ctx, h.rdb, userID)
+	// 用 WithoutCancel 执行失效：客户端断开不应中断缓存清理，与 diary 模块策略一致。
+	InvalidateUserCache(context.WithoutCancel(ctx), h.rdb, userID)
 }
 
+//nolint:dupl // 与 GetDiary 共用 authenticateMcpQuery 后的查询-响应尾部，结构重复可读性优先
 func (h *Handler) ListMemories(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	if !h.rateLimiter.Allow(r) {
-		middleware.JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "too many requests")
+	key, startDate, endDate, limit, ok := h.authenticateMcpQuery(w, r)
+	if !ok {
 		return
 	}
-	key, err := h.authenticateAPIKey(ctx, extractBearer(r.Header.Get("Authorization")))
-	if err != nil {
-		middleware.JSONError(w, r, http.StatusUnauthorized, errors.CodeUnauthorized, "invalid api key")
-		return
-	}
-
-	startDate, endDate, err := parseMcpDateRange(r)
-	if err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, err.Error())
-		return
-	}
-
-	limit := parseMcpLimit(r)
 
 	data, err := h.queryMemoryItems(ctx, key.userID, startDate, endDate, limit)
 	if err != nil {
@@ -650,11 +648,24 @@ func (h *Handler) ListMemories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := checkMcpResponseSize(map[string]interface{}{"data": data}); err != nil {
-		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "response too large")
-		return
+	data, truncated := truncateMemoryItems(data)
+	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{"data": data, "truncated": truncated})
+}
+
+// truncateMemoryItems 以字节预算截断记忆列表（同 buildMcpDiaryResponse 的预算策略）。
+func truncateMemoryItems(items []memoryItem) ([]memoryItem, bool) {
+	if items == nil {
+		return []memoryItem{}, false // 空结果返回 [] 而非 null，保证列表契约
 	}
-	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{"data": data})
+	const budgetBytes = maxMcpMessageSize * 4 / 5
+	used := 0
+	for i, item := range items {
+		used += len(item.Title) + len(item.Content) + len(item.Location) + 128
+		if used > budgetBytes {
+			return items[:i], true
+		}
+	}
+	return items, false
 }
 
 func (h *Handler) queryMemoryItems(ctx context.Context, userID string, startDate, endDate time.Time, limit int) ([]memoryItem, error) {
@@ -671,7 +682,8 @@ func (h *Handler) queryMemoryItems(ctx context.Context, userID string, startDate
 		if err != nil {
 			return nil, err
 		}
-		if data, err := json.Marshal(items); err == nil {
+		// R2-04：与 listUserDiaryEntries 一致，仅小结果写缓存，防止大日期范围组合撑爆 Redis。
+		if data, err := json.Marshal(items); err == nil && len(data) <= maxMcpMessageSize {
 			_ = h.rdb.Set(ctx, key, data, mcpCacheTTL).Err() //nolint:errcheck
 		}
 		return items, nil

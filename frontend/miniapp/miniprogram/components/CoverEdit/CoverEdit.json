@@ -2,7 +2,6 @@
   "styleIsolation": "apply-shared",
   "component": true,
   "usingComponents": {
-    "Drawer": "/components/Drawer/Drawer",
-    "PTextarea": "/components/PTextarea/PTextarea"
+    "Drawer": "/components/Drawer/Drawer"
   }
 }

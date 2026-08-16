@@ -53,7 +53,7 @@ func TestMergeStayPoints_DistantLocationsSplit(t *testing.T) {
 	now := time.Now()
 	rows := []sqlc.AutoRecordTrajectory{
 		makeRow("a", 23.1291, 113.2644, now),
-		// ~0.01 degrees ~1km apart, far beyond 200m merge radius
+		// ~0.01 degrees ~1km apart, far beyond merge radius (300m)
 		makeRow("b", 23.1391, 113.2744, now.Add(1*time.Minute)),
 	}
 	clusters, _ := s.mergeStayPoints(rows)
@@ -65,7 +65,7 @@ func TestMergeStayPoints_DistantLocationsSplit(t *testing.T) {
 func TestMergeStayPoints_WalkPath(t *testing.T) {
 	s := &Service{}
 	now := time.Now()
-	// Walking path: each point within 200m of previous
+	// Walking path: each point within merge radius of previous
 	// 0.001 deg ~111m at equator, so these are ~111m apart each
 	rows := []sqlc.AutoRecordTrajectory{
 		makeRow("a", 23.1291, 113.2644, now),
@@ -74,7 +74,7 @@ func TestMergeStayPoints_WalkPath(t *testing.T) {
 		makeRow("d", 23.1321, 113.2644, now.Add(15*time.Minute)),
 	}
 	clusters, _ := s.mergeStayPoints(rows)
-	// All should merge since each consecutive pair is within 200m
+	// All should merge since each consecutive pair is within merge radius
 	if len(clusters) != 1 {
 		t.Fatalf("expected 1 cluster for walking path, got %d", len(clusters))
 	}
@@ -122,9 +122,9 @@ func TestMergeStayPoints_CentroidRegression(t *testing.T) {
 	now := time.Now()
 	// This is the specific bug we fixed: the old code used centroid
 	// for distance check. If points form a "V" shape (first going east,
-	// then further east but within 200m of the second point), the
+	// then further east but within merge radius of the second point), the
 	// centroid-based check could falsely split.
-	// 0.001 deg ~111m, so 0.0018 deg ~200m.
+	// 0.001 deg ~111m, so 0.0027 deg ~300m.
 	// Point A at 0, B at 0.0015 east (~166m from A), C at 0.003 east (~166m from B, ~333m from A)
 	rows := []sqlc.AutoRecordTrajectory{
 		makeRow("a", 23.1291, 113.2644, now),
@@ -133,7 +133,7 @@ func TestMergeStayPoints_CentroidRegression(t *testing.T) {
 	}
 	clusters, _ := s.mergeStayPoints(rows)
 	// B is ~166m from A, C is ~166m from B
-	// With centroid fix: C is within 200m of B → merge all 3
+	// With centroid fix: C is within merge radius of B → merge all 3
 	// Without fix: centroid of A+B at ~0.00075 deg, C is ~0.00225 deg from centroid = ~250m → false split
 	if len(clusters) != 1 {
 		t.Fatalf("centroid regression: expected 1 cluster (3 points), got %d", len(clusters))

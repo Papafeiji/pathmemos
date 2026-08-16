@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"papafeiji/backend/internal/avatar"
 	"papafeiji/backend/internal/db"
@@ -72,7 +72,7 @@ func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	user, err := h.pool.Queries().GetUserByID(ctx, userID)
 	if err != nil {
 		if stderrors.Is(err, pgx.ErrNoRows) {
-			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeBadRequest, "user not found")
+			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeNotFound, "user not found")
 			return
 		}
 		slog.ErrorContext(ctx, "failed to get user profile", slog.String("user_id", userID), slog.Any("error", err))
@@ -84,6 +84,10 @@ func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	mpAccount, err := h.pool.Queries().GetWxMPAccountByUserID(ctx, pgtype.Text{String: userID, Valid: true})
 	if err == nil {
 		mpSubscribed = mpAccount.Subscribed
+	} else if !stderrors.Is(err, pgx.ErrNoRows) {
+		// 无公众号绑定记录（ErrNoRows）是正常情况，静默降级；
+		// 仅真实 DB 故障才记录日志，避免每次拉取资料都刷 WARN。
+		slog.WarnContext(ctx, "get wx mp account failed, degrade to unsubscribed", slog.String("user_id", userID), slog.Any("error", err))
 	}
 
 	middleware.JSON(w, r, http.StatusOK, userinfo.Build(ctx, &user, h.vipService, h.defaultAvatar, mpSubscribed))
@@ -108,7 +112,7 @@ func (h *Handler) UpdateAvatar(w http.ResponseWriter, r *http.Request) {
 	user, err := h.pool.Queries().GetUserByID(ctx, userID)
 	if err != nil {
 		if stderrors.Is(err, pgx.ErrNoRows) {
-			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeBadRequest, "user not found")
+			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeNotFound, "user not found")
 			return
 		}
 
@@ -120,7 +124,7 @@ func (h *Handler) UpdateAvatar(w http.ResponseWriter, r *http.Request) {
 	avatarFile, err := h.pool.Queries().GetFileByID(ctx, *req.FileID)
 	if err != nil {
 		if stderrors.Is(err, pgx.ErrNoRows) {
-			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeBadRequest, "file not found")
+			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeNotFound, "file not found")
 			return
 		}
 
@@ -132,7 +136,7 @@ func (h *Handler) UpdateAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !avatarFile.CreatedBy.Valid || avatarFile.CreatedBy.String == "" || avatarFile.CreatedBy.String != userID {
-		middleware.JSONError(w, r, http.StatusForbidden, errors.CodeBadRequest, "file does not belong to user")
+		middleware.JSONError(w, r, http.StatusForbidden, errors.CodeForbidden, "file does not belong to user")
 		return
 	}
 	avatar, urlErr := h.storage.URL(avatarFile.Path, avatarFile.StorageType)
@@ -299,8 +303,10 @@ func (h *Handler) UpdateCommonAddressName(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	userID := middleware.UserID(ctx)
 
-	name, err := url.PathUnescape(chi.URLParam(r, "name"))
-	if err != nil || name == "" {
+	// chi.URLParam 返回的是已解码的路径参数，不能再做 PathUnescape：
+	// 含 "%" 的地址名（如 "100%棉"）会被二次解码报错或改写。
+	name := chi.URLParam(r, "name")
+	if name == "" {
 		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid name")
 		return
 	}
@@ -318,7 +324,8 @@ func (h *Handler) UpdateCommonAddressName(w http.ResponseWriter, r *http.Request
 		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "newName is required")
 		return
 	}
-	if len(newName) > 100 {
+	// 长度按 code points 计（与昵称/日记正文/地址等全站口径一致），CJK 名称不受字节数偏差影响。
+	if utf8.RuneCountInString(newName) > 100 {
 		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "newName too long")
 		return
 	}
@@ -327,8 +334,9 @@ func (h *Handler) UpdateCommonAddressName(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	err = db.WithTx(ctx, h.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
-		if _, err := q.GetUserCommonAddress(ctx, sqlc.GetUserCommonAddressParams{
+	err := db.WithTx(ctx, h.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
+		// B6a-13：对源行加行锁（FOR UPDATE），串行化同一地址的并发合并/重命名。
+		if _, err := q.GetUserCommonAddressForUpdate(ctx, sqlc.GetUserCommonAddressForUpdateParams{
 			UserID: userID,
 			Name:   name,
 		}); err != nil {
@@ -350,6 +358,13 @@ func (h *Handler) UpdateCommonAddressName(w http.ResponseWriter, r *http.Request
 			}); err != nil {
 				return fmt.Errorf("merge common address: %w", err)
 			}
+			// H2：源行删除为独立语句在事务内执行（sqlc 会静默丢弃同一 named 块中的第二条语句）。
+			if err := q.DeleteUserCommonAddressByName(ctx, sqlc.DeleteUserCommonAddressByNameParams{
+				UserID: userID,
+				Name:   name,
+			}); err != nil {
+				return fmt.Errorf("delete merged source address: %w", err)
+			}
 		} else if stderrors.Is(err, pgx.ErrNoRows) {
 			if err := q.RenameUserCommonAddress(ctx, sqlc.RenameUserCommonAddressParams{
 				UserID: userID,
@@ -369,7 +384,7 @@ func (h *Handler) UpdateCommonAddressName(w http.ResponseWriter, r *http.Request
 	})
 	if err != nil {
 		if stderrors.Is(err, errCommonAddressNotFound) {
-			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeBadRequest, "common address not found")
+			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeNotFound, "common address not found")
 			return
 		}
 		slog.ErrorContext(ctx, "failed to update common address name",

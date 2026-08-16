@@ -106,14 +106,16 @@ class I18n {
     if (this.mode === mode) return;
     this.mode = mode;
     const locale = this._resolveLocale();
-    if (this.locale === locale) return;
-    this.locale = locale;
+    // 先持久化 mode：auto+系统中文时手动选"中文"虽 locale 不变，也必须落盘，
+    // 否则重启后语言设置回退到 auto。
     try {
       wx.setStorageSync(MODE_KEY, mode);
       wx.removeStorageSync(LEGACY_LOCALE_KEY);
     } catch {
       // ignore storage failure
     }
+    if (this.locale === locale) return;
+    this.locale = locale;
     this.listeners.forEach((cb) => cb(locale));
   }
 

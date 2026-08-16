@@ -73,6 +73,7 @@ Page({
   },
 
   onShow() {
+    const wasHidden = (this as any)._isHidden;
     this._isHidden = false;
     (this as any)._applyPendingSetData();
     const cachedVipInfo = formatVipInfo(request.getVipInfo());
@@ -88,8 +89,9 @@ Page({
       if ((this as any)._isDestroyed || (this as any)._isHidden) return;
       logger.error('Vip onShow 刷新 VIP 信息失败', err);
     });
-    // 切后台期间完成的商品列表请求可能因 _safeSetData 被跳过而丢失，返回前台后为空则补偿刷新。
-    if (this.data.paymentAvailable && (!this.data.commodity || this.data.commodity.length === 0)) {
+    // 仅"切后台返回"时补偿刷新商品列表：首次进入 onLoad 已发起请求，
+    // 此时 cancel+重发会白费一次请求（与 Mcp 页 wasHidden 守卫一致）。
+    if (wasHidden && this.data.paymentAvailable && (!this.data.commodity || this.data.commodity.length === 0)) {
       if (this._cancelToken) {
         try { this._cancelToken.cancel(); } catch {}
       }
@@ -162,7 +164,8 @@ Page({
   },
 
   openPrivacy() {
-    openUrl(`${getHelpBaseURL()}/tutorial/privacy-police/`);
+    // R2-F16：链接收敛到 config 集中管理。
+    openUrl(`${getHelpBaseURL()}/tutorial/privacy-policy/`);
   },
 
   openUser() {
@@ -350,6 +353,9 @@ Page({
 
   async doClaimFreeVip() {
     if (this.data.vipInfo?.receivedFreeVip) return;
+    // 入口级防重：双击会 cancel 上一次在途领取（写请求），必须挡住。
+    if ((this as any)._claiming) return;
+    (this as any)._claiming = true;
     (this as any)._safeSetData({ claiming: true });
     if ((this as any)._claimCancelToken) {
       try { (this as any)._claimCancelToken.cancel(); } catch {}
@@ -402,6 +408,7 @@ Page({
         wx.showToast({ title: e?.data?.msg || (this as any).$t('vip.claimFail'), icon: 'none' });
       }
     } finally {
+      (this as any)._claiming = false;
       (this as any)._safeSetData({ claiming: false });
       (this as any)._claimCancelToken = null;
     }

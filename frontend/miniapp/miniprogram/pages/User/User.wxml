@@ -21,7 +21,7 @@
         <view class="pro">{{_i18n['profile.pro']}}</view>
         <view class="validity" wx:if="{{vipInfo.isVip > 0}}">{{_i18n['profile.validityLabel']}} {{vipInfo.vipExpireTime}}</view>
         <view wx:else class="btn">
-          {{vipInfo.receivedFreeVip > 0 ? _i18n['profile.buyVip'] : _i18n['profile.freeTrial']}}
+          {{vipInfo.receivedFreeVip ? _i18n['profile.buyVip'] : _i18n['profile.freeTrial']}}
           <image src="../../image/icon_arrow_right.png" />
         </view>
       </view>

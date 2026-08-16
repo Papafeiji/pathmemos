@@ -70,7 +70,7 @@ Page({
   },
 
   openByPrivacyPolicy() {
-    openUrl(`${getHelpBaseURL()}/tutorial/privacy-police/`);
+    openUrl(`${getHelpBaseURL()}/tutorial/privacy-policy/`);
   },
 
   openByServices() {
@@ -102,6 +102,10 @@ Page({
   },
 
   onConfirmDialogConfirm() {
+    // 防重入：setData 生效窗口内双击会双发 DELETE /auth/account。
+    if ((this as any).data.deleting) {
+      return;
+    }
     const confirmName = ((this as any).data.deleteConfirmInput || '').trim();
     if (!confirmName) {
       return;

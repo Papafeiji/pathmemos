@@ -26,23 +26,64 @@
 
       <view wx:if="{{apiKey || mcpConfigText}}" class="info-card">
         <view class="card-header">
-          <view class="card-title">{{_i18n['mcp.apiKeyTitle']}}</view>
+          <view class="card-title">
+            <text class="step-badge">1</text>
+            <text>{{_i18n['mcp.step1Title']}}</text>
+          </view>
           <view class="refresh-icon" bindtap="refreshKey">
             <text class="refresh-symbol">⟳</text>
           </view>
         </view>
 
         <view class="key-value" bindtap="onKeyTap">
-          <text selectable>{{apiKey}}</text>
+          <text class="key-text" selectable>{{apiKey}}</text>
+          <view class="copy-chip">{{_i18n['mcp.copy']}}</view>
+        </view>
+
+        <view class="tip-list key-tip" wx:if="{{!apiKey}}">
+          <view class="tip-item">{{_i18n['mcp.mcpRegenerateTip']}}</view>
+        </view>
+      </view>
+
+      <view wx:if="{{apiKey || mcpConfigText}}" class="info-card">
+        <view class="card-header">
+          <view class="card-title">
+            <text class="step-badge">2</text>
+            <text>{{_i18n['mcp.step2Title']}}</text>
+          </view>
         </view>
 
         <view class="tab-bar">
-          <view class="tab-item {{activeTab === 'input' ? 'active' : ''}}" data-tab="input" bindtap="switchTab">{{_i18n['mcp.inputMemory']}}</view>
-          <view class="tab-item {{activeTab === 'query' ? 'active' : ''}}" data-tab="query" bindtap="switchTab">{{_i18n['mcp.queryMemory']}}</view>
+          <view class="tab-item {{activeTab === 'mcp' ? 'active' : ''}}" data-tab="mcp" bindtap="switchTab">{{_i18n['mcp.tabMcp']}}</view>
+          <view wx:if="{{authUrl}}" class="tab-item {{activeTab === 'connector' ? 'active' : ''}}" data-tab="connector" bindtap="switchTab">{{_i18n['mcp.tabConnector']}}</view>
+          <view class="tab-item {{activeTab === 'http' ? 'active' : ''}}" data-tab="http" bindtap="switchTab">{{_i18n['mcp.tabHttp']}}</view>
         </view>
 
-        <view class="tab-content" wx:if="{{activeTab === 'input'}}">
-          <view class="section-title">{{_i18n['mcp.apiConfig']}}</view>
+        <view class="tab-content" wx:if="{{activeTab === 'mcp'}}">
+          <view class="tab-desc">{{_i18n['mcp.mcpTabDesc']}}</view>
+          <view class="tip-code mcp-config-code">
+            <text selectable>{{mcpConfigText}}</text>
+          </view>
+          <view class="copy-config-btn" bindtap="onCopyConfig">{{_i18n['mcp.copyConfig']}}</view>
+        </view>
+
+        <view class="tab-content" wx:if="{{activeTab === 'connector' && authUrl}}">
+          <view class="tab-desc">{{_i18n['mcp.connectorTabDesc']}}</view>
+          <view class="step-list">
+            <view class="step-item">{{_i18n['mcp.connectorStep1']}}</view>
+            <view class="step-item">{{_i18n['mcp.connectorStep2']}}</view>
+            <view class="step-item">{{_i18n['mcp.connectorStep3']}}</view>
+          </view>
+          <view class="tip-code">
+            <text selectable>{{authUrl}}</text>
+          </view>
+          <view class="copy-config-btn" bindtap="onCopyAuthUrl">{{_i18n['mcp.copyLink']}}</view>
+        </view>
+
+        <view class="tab-content" wx:if="{{activeTab === 'http'}}">
+          <view class="tab-desc">{{_i18n['mcp.httpTabDesc']}}</view>
+
+          <view class="section-title">{{_i18n['mcp.writeMemory']}}</view>
           <view class="tip-code" selectable>
 POST {{memoryUrl}}
 Authorization: Bearer {{apiKey}}
@@ -59,10 +100,8 @@ Content-Type: application/json
             <view class="tip-item">{{_i18n['mcp.tipTitle']}}</view>
             <view class="tip-item">{{_i18n['mcp.tipContent']}}</view>
           </view>
-        </view>
 
-        <view class="tab-content" wx:if="{{activeTab === 'query'}}">
-          <view class="section-title">{{_i18n['mcp.apiConfig']}}</view>
+          <view class="section-title http-section-gap">{{_i18n['mcp.queryMemory']}}</view>
           <view class="tip-code" selectable>
 GET {{apiUrl}}?start_date=2024-01-01&end_date=2024-12-31
 Authorization: Bearer {{apiKey}}
@@ -72,21 +111,6 @@ Authorization: Bearer {{apiKey}}
             <view class="tip-item">{{_i18n['mcp.queryDateRange']}}</view>
             <view class="tip-item">{{_i18n['mcp.queryLimit']}}</view>
             <view class="tip-item">{{_i18n['mcp.queryResultOrder']}}</view>
-          </view>
-        </view>
-
-        <view class="mcp-section">
-          <view class="section-title">{{_i18n['mcp.mcpConfig']}}</view>
-          <view class="tip-code mcp-config-code">
-            <text selectable>{{mcpConfigText}}</text>
-          </view>
-          <view class="tip-list">
-            <view class="tip-item">{{_i18n['mcp.mcpSupport']}}</view>
-            <view class="tip-item" wx:if="{{!apiKey}}">{{_i18n['mcp.mcpRegenerateTip']}}</view>
-            <block wx:if="{{authUrl}}">
-              <view class="tip-item">{{_i18n['mcp.bindPageTip']}}</view>
-              <view class="tip-code" selectable>{{authUrl}}</view>
-            </block>
           </view>
         </view>
       </view>

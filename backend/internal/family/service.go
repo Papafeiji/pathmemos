@@ -75,13 +75,27 @@ type AccountCleanupInfo struct {
 	AffectedUserIDs  []string
 }
 
+// DefaultAvatarMarkerPath 是系统默认头像 marker 的资源路径：全局共享资产，注销时不可删除。
+const DefaultAvatarMarkerPath = "system-assets/default-marker.png"
+
+// MarkerDeletable 判断注销清理时是否应删除用户头像 marker（B6a-14/C2）。
+// 用精确相等替换原先的 strings.Contains("default-marker") 子串判断，避免误伤合法路径。
+func (i *AccountCleanupInfo) MarkerDeletable() bool {
+	return i.MarkerPath != "" && i.MarkerPath != DefaultAvatarMarkerPath
+}
+
 func (s *Service) GetFamily(ctx context.Context, userID string) (*FamilyInfo, error) {
 	user, err := s.pool.Queries().GetUserByID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user: %w", err)
 	}
 
-	family, err := s.pool.Queries().GetFamilyByID(ctx, util.ToString(user.CurrentFamilyID))
+	currentFamilyID := util.ToString(user.CurrentFamilyID)
+	if currentFamilyID == "" {
+		// 无当前家庭（如 open 默认用户）返回空信息而非 500。
+		return &FamilyInfo{}, nil
+	}
+	family, err := s.pool.Queries().GetFamilyByID(ctx, currentFamilyID)
 	if err != nil {
 		return nil, fmt.Errorf("get family: %w", err)
 	}
@@ -101,7 +115,7 @@ func (s *Service) GetFamily(ctx context.Context, userID string) (*FamilyInfo, er
 		member := Member{
 			UserID:   m.UserID,
 			Avatar:   s.avatarURL(m.Avatar, m.UserID),
-			Nickname: textInterface(m.Nickname),
+			Nickname: util.ToInterface(m.Nickname),
 			Role:     m.Role,
 			JoinedAt: m.JoinedAt.Time,
 		}
@@ -281,6 +295,9 @@ func (s *Service) JoinFamily(ctx context.Context, userID, targetFamilyID string)
 
 func (s *Service) joinFamilyTx(ctx context.Context, q *sqlc.Queries, user sqlc.GetUserByIDRow, targetFamilyID string, isOwnerOfSource bool) error {
 	if isOwnerOfSource {
+		// 设计决策：家庭 owner 加入别人家庭时，会把源家庭全体成员一起迁入目标家庭并解散源家庭
+		//（家庭合并语义）。/family/invite-link/join 与 /invite/join-family 共用此实现，
+		// owner 扫码加入即触发整家合并——这是预期行为，非越权/误删。
 
 		sourceFamilyID := util.ToString(user.CurrentFamilyID)
 
@@ -407,6 +424,13 @@ func (s *Service) LeaveFamily(ctx context.Context, userID string) error {
 	if err == nil && ownerID == userID {
 		return ErrOwnerCannotLeave
 	}
+	if err != nil && !stderrors.Is(err, pgx.ErrNoRows) {
+		// 无 owner 记录属异常数据（告警并放行），其余 DB 错误不得静默吞掉。
+		return fmt.Errorf("get family owner: %w", err)
+	}
+	if stderrors.Is(err, pgx.ErrNoRows) {
+		slog.WarnContext(ctx, "family has no owner record", slog.String("user_id", userID))
+	}
 
 	familyID := util.ToString(user.CurrentFamilyID)
 	lockKeys := []string{"lock:family:" + familyID}
@@ -528,21 +552,26 @@ func (s *Service) leaveToPersonalTx(ctx context.Context, q *sqlc.Queries, user s
 		return fmt.Errorf("delete membership: %w", err)
 	}
 
-	membershipID, err := util.NewUUID()
-	if err != nil {
-		return fmt.Errorf("generate membership id: %w", err)
-	}
-	if _, err := q.UpsertFamilyMembership(ctx, sqlc.UpsertFamilyMembershipParams{
-		ID:       membershipID,
-		FamilyID: util.ToString(user.PersonalFamilyID),
-		UserID:   user.ID,
-		Role:     "owner",
-	}); err != nil {
-		return fmt.Errorf("rejoin personal family: %w", err)
+	personalFamilyID := util.ToString(user.PersonalFamilyID)
+	// PersonalFamilyID 为空（open 模式默认用户/异常数据）时跳过重入个人家庭，
+	// 否则空 family_id 命中 family_members 外键导致退出/被移除/注销永久 500。
+	if personalFamilyID != "" {
+		membershipID, err := util.NewUUID()
+		if err != nil {
+			return fmt.Errorf("generate membership id: %w", err)
+		}
+		if _, err := q.UpsertFamilyMembership(ctx, sqlc.UpsertFamilyMembershipParams{
+			ID:       membershipID,
+			FamilyID: personalFamilyID,
+			UserID:   user.ID,
+			Role:     "owner",
+		}); err != nil {
+			return fmt.Errorf("rejoin personal family: %w", err)
+		}
 	}
 
 	sourceFamilyID := util.ToString(user.CurrentFamilyID)
-	targetFamilyID := util.ToString(user.PersonalFamilyID)
+	targetFamilyID := personalFamilyID
 	if sourceFamilyID != "" && targetFamilyID != "" && sourceFamilyID != targetFamilyID {
 		hasCovers, err := q.CountFamilyDailyCovers(ctx, sourceFamilyID)
 		if err != nil {
@@ -580,10 +609,14 @@ func (s *Service) dissolveFamilyTx(ctx context.Context, q *sqlc.Queries, familyI
 	memberUserIDs := make([]string, 0, len(members))
 	migrateUserIDs := make([]string, 0, len(members))
 	migrateFamilyIDs := make([]string, 0, len(members))
+	noPersonalFamilyUserIDs := make([]string, 0, len(members))
 	for _, m := range members {
 		personalFamilyID := util.ToString(m.PersonalFamilyID)
 		if personalFamilyID == "" {
-			return fmt.Errorf("member %s has no personal family", m.ID)
+			// open 模式默认用户可能无个人家庭：跳过其个人家庭重入，仅清空 current_family_id，
+			// 避免 dissolveFamilyTx 硬失败导致家庭永久无法解散/owner 注销失败（与 leaveToPersonalTx 一致）。
+			noPersonalFamilyUserIDs = append(noPersonalFamilyUserIDs, m.ID)
+			continue
 		}
 		membershipID, err := util.NewUUID()
 		if err != nil {
@@ -624,6 +657,16 @@ func (s *Service) dissolveFamilyTx(ctx context.Context, q *sqlc.Queries, familyI
 			PersonalFamilyIds: memberFamilyIDs,
 		}); err != nil {
 			return fmt.Errorf("update members current family: %w", err)
+		}
+	}
+
+	// 在删除家庭前清空无个人家庭成员的 current_family_id，避免 ON DELETE RESTRICT 外键失败。
+	if len(noPersonalFamilyUserIDs) > 0 {
+		if err := q.UpdateUsersCurrentFamily(ctx, sqlc.UpdateUsersCurrentFamilyParams{
+			Column1:         noPersonalFamilyUserIDs,
+			CurrentFamilyID: pgtype.Text{},
+		}); err != nil {
+			return fmt.Errorf("clear current family for members without personal family: %w", err)
 		}
 	}
 
@@ -776,11 +819,14 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (*AccountCle
 			return fmt.Errorf("clear personal family: %w", err)
 		}
 
-		if err := q.DeleteFamilyDailyCovers(ctx, personalFamilyID); err != nil {
-			return fmt.Errorf("delete personal family daily covers: %w", err)
-		}
-		if err := q.DeleteFamily(ctx, personalFamilyID); err != nil {
-			return fmt.Errorf("delete personal family: %w", err)
+		// 无个人家庭的用户（如 open 默认用户）跳过删除，避免以空主键误删。
+		if personalFamilyID != "" {
+			if err := q.DeleteFamilyDailyCovers(ctx, personalFamilyID); err != nil {
+				return fmt.Errorf("delete personal family daily covers: %w", err)
+			}
+			if err := q.DeleteFamily(ctx, personalFamilyID); err != nil {
+				return fmt.Errorf("delete personal family: %w", err)
+			}
 		}
 
 		if err := q.NullifyOrdersByUser(ctx, pgtype.Text{String: userID, Valid: true}); err != nil {
@@ -920,18 +966,5 @@ func (s *Service) listCoverFileIDs(ctx context.Context, q *sqlc.Queries, familyI
 }
 
 func (s *Service) avatarURL(avatar pgtype.Text, userID string) interface{} {
-	if !avatar.Valid || avatar.String == "" {
-		if s.defaultAvatar == "" {
-			return nil
-		}
-		return s.defaultAvatar + userID
-	}
-	return avatar.String
-}
-
-func textInterface(t pgtype.Text) interface{} {
-	if !t.Valid || t.String == "" {
-		return nil
-	}
-	return t.String
+	return util.AvatarURLOrDefault(avatar, userID, s.defaultAvatar)
 }

@@ -9,6 +9,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"papafeiji/backend/internal/db"
@@ -27,6 +28,8 @@ type OpenAuthMiddleware struct {
 	sessions        *SessionManager
 	pool            *db.Pool
 	expectedKeyHash string
+	// B6a-09：连续失败计数——达到阈值才延时，避免每次失败都占用请求 goroutine 500ms。
+	failCount atomic.Int32
 }
 
 func NewOpenAuthMiddleware(sessions *SessionManager, pool *db.Pool, openAPIKey string) *OpenAuthMiddleware {
@@ -66,12 +69,16 @@ func (m *OpenAuthMiddleware) Handler(next http.Handler) http.Handler {
 			if apiKey != "" {
 				userID, err := m.lookupUserByAPIKey(r.Context(), apiKey)
 				if err == nil && userID != "" {
+					m.failCount.Store(0)
 					r = r.WithContext(WithSessionID(WithUserID(r.Context(), userID), "apikey:"+userID))
 					next.ServeHTTP(w, r)
 					return
 				}
-				// API Key 校验失败时固定延时，压低暴力穷举速率（正常流量不会走到这里）。
-				time.Sleep(500 * time.Millisecond)
+				// B6a-09：连续失败达到阈值才延时，压低暴力穷举速率且不拖慢偶发错误请求。
+				if m.failCount.Add(1) >= 3 {
+					time.Sleep(500 * time.Millisecond)
+					m.failCount.Store(0)
+				}
 			}
 		}
 

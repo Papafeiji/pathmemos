@@ -20,6 +20,10 @@
       <text>{{_i18n['usageGuide.shareTrip']}}</text>
       <text class="iconfont ppfjhoutui"></text>
     </view>
+    <view class="ug-cell" bindtap="openTutorial4">
+      <text>{{_i18n['usageGuide.exportDiary']}}</text>
+      <text class="iconfont ppfjhoutui"></text>
+    </view>
     <view class="ug-cell" bindtap="openTutorial5">
       <text>{{_i18n['usageGuide.collectWorkMemory'] || ''}}</text>
       <text class="iconfont ppfjhoutui"></text>

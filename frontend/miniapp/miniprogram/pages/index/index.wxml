@@ -15,6 +15,11 @@
     enhanced
     scroll-anchoring
     upper-threshold="10"
+    refresher-enabled
+    refresher-triggered="{{refresherTriggered}}"
+    refresher-default-style="{{theme === 'dark' ? 'white' : 'black'}}"
+    refresher-background="{{theme === 'dark' ? '#0f0f10' : '#f7f7f8'}}"
+    bindrefresherrefresh="handlePullRefresh"
     bindscrolltolower="handleLoadMore"
     bindscroll="handleScroll"
     bindscrolltoupper="handleScrollToUpper"

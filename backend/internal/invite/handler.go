@@ -20,7 +20,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -94,8 +93,8 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		items = append(items, map[string]interface{}{
 			"userId":    row.UserID,
-			"nickName":  textInterface(row.Nickname),
-			"avatarUrl": avatarInterface(row.Avatar),
+			"nickName":  util.ToInterface(row.Nickname),
+			"avatarUrl": util.ToInterface(row.Avatar),
 			"joined":    row.Joined.Valid && row.Joined.Bool,
 		})
 	}
@@ -141,6 +140,11 @@ func (h *Handler) JoinFamily(w http.ResponseWriter, r *http.Request) {
 	// 2. 校验邀请人存在且是其当前非个人家庭的成员。
 	inviter, err := h.pool.Queries().GetUserByID(ctx, req.InviterID)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// B5-24：邀请人不存在是业务结果而非系统故障，返回 404。
+			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeNotFound, "inviter not found")
+			return
+		}
 		middleware.JSONError(w, r, http.StatusInternalServerError, pkgerrors.CodeInternalError, "failed to get inviter")
 		return
 	}
@@ -252,25 +256,11 @@ func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if userID == "" {
-		middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeBadRequest, "invite code not found")
+		middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeNotFound, "invite code not found")
 		return
 	}
 
 	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{
 		"userId": userID,
 	})
-}
-
-func textInterface(t pgtype.Text) interface{} {
-	if !t.Valid || t.String == "" {
-		return nil
-	}
-	return t.String
-}
-
-func avatarInterface(t pgtype.Text) interface{} {
-	if !t.Valid || t.String == "" {
-		return nil
-	}
-	return t.String
 }

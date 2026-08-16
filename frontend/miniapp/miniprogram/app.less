@@ -62,9 +62,11 @@ view {
   box-sizing: border-box;
 }
 
+/* 回归修复（R2-F13 回滚）：抽屉过渡动画期间隐藏底部操作区，恢复原有视觉行为。 */
 .transition {
   .noteEdits-btns,
   .bottom-input-view {
     opacity: 0;
   }
 }
+

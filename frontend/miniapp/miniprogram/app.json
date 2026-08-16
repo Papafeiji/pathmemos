@@ -33,9 +33,6 @@
   "permission": {
     "scope.userLocation": {
       "desc": "用于记录日记位置"
-    },
-    "scope.userLocationBackground": {
-      "desc": "用于后台持续记录行程轨迹"
     }
   },
   "window": {

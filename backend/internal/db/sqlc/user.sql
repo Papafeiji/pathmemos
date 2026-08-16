@@ -36,6 +36,10 @@ UPDATE users SET nickname = $2, updated_at = now() WHERE id = $1;
 -- name: UpdateUserPhone :exec
 UPDATE users SET phone_number = $2, phone_bind_time = $3, updated_at = now() WHERE id = $1;
 
+-- name: UpdateUserInvitedBy :execrows
+-- 仅当尚无邀请人时写入（登录后补绑场景的幂等闸门，R4）。
+UPDATE users SET invited_by = $2, updated_at = now() WHERE id = $1 AND (invited_by IS NULL OR invited_by = '');
+
 -- name: UpdateUserCurrentFamily :exec
 UPDATE users SET current_family_id = $2, updated_at = now() WHERE id = $1;
 
@@ -80,6 +84,24 @@ WHERE id = $1
 
 -- name: DeleteUser :exec
 DELETE FROM users WHERE id = $1;
+
+-- name: GetUserImageStorageUsage :one
+SELECT image_storage_bytes FROM users WHERE id = $1;
+
+-- name: IncrementUserImageStorage :execrows
+-- B5-12：条件原子扣减——超限时更新 0 行，由调用方识别拒绝，杜绝 check-then-act 竞态。
+UPDATE users
+SET image_storage_bytes = image_storage_bytes + $2,
+    updated_at = now()
+WHERE id = $1
+  AND (sqlc.arg(storage_limit)::bigint <= 0 OR image_storage_bytes + $2 <= sqlc.arg(storage_limit));
+
+-- name: DecrementUserImageStorage :exec
+-- GREATEST 保底：并发/重复扣减时计量不得为负（负值会绕过存储限额检查）。
+UPDATE users
+SET image_storage_bytes = GREATEST(image_storage_bytes - $2, 0),
+    updated_at = now()
+WHERE id = $1;
 
 -- name: UpsertUserAvatarMarker :exec
 INSERT INTO user_avatar_markers (user_id, marker_path, storage_type, updated_at)

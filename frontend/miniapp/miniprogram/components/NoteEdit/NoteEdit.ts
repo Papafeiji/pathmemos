@@ -1,6 +1,6 @@
 
-import dayjs from 'dayjs';
-import { safeDayjs, getReverseAddress, flatDistanceMeters, type ReverseAddressResult } from '../../utils/util';
+import dayjs from '../../lib/dayjs';
+import { safeDayjs, getReverseAddress, flatDistanceMeters, formatTimeLabel, type ReverseAddressResult } from '../../utils/util';
 import request, { FILE_TYPE, getErrorMessage, createCancelToken, resetLoading } from '../../utils/request';
 import i18nBehavior from '../../behaviors/i18n';
 import { i18n } from '../../utils/i18n';
@@ -16,29 +16,7 @@ function formatDisplayDate(d: dayjs.Dayjs) {
 function formatDisplayTime(timeStr: string) {
   if (!timeStr || typeof timeStr !== 'string') return '';
   const [h, m] = timeStr.split(':');
-  const hour = parseInt(h, 10);
-  const minute = parseInt(m, 10);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return '';
-  let periodKey = '';
-  if (hour === 0) {
-    periodKey = 'timePicker.period.midnight';
-  } else if (hour >= 1 && hour <= 4) {
-    periodKey = 'timePicker.period.earlyMorning';
-  } else if (hour >= 5 && hour <= 8) {
-    periodKey = 'timePicker.period.morning';
-  } else if (hour >= 9 && hour <= 11) {
-    periodKey = 'timePicker.period.forenoon';
-  } else if (hour === 12) {
-    periodKey = 'timePicker.period.noon';
-  } else if (hour >= 13 && hour <= 18) {
-    periodKey = 'timePicker.period.afternoon';
-  } else {
-    periodKey = 'timePicker.period.evening';
-  }
-  const period = i18n.t(periodKey);
-  const displayHour = hour === 0 ? 12 : (hour <= 12 ? hour : hour - 12);
-  const displayMinute = minute < 10 ? `0${minute}` : `${minute}`;
-  return `${period} ${displayHour}:${displayMinute}`;
+  return formatTimeLabel(parseInt(h, 10), parseInt(m, 10));
 }
 
 Component({
@@ -79,6 +57,7 @@ Component({
       cancelText: '',
       confirmText: '',
       confirmType: 'default',
+      action: '' as 'location' | 'upgrade' | '',
     },
   },
 
@@ -104,7 +83,6 @@ Component({
   lifetimes: {
     attached: function () {
       (this as any)._isDestroyed = false;
-      (this as any)._locationRequested = false;
       (this as any)._locating = false;
       // 新建/无 id 时，若父页面未指定日期，把日期时间重置为当前时刻；
       // 避免 data 初始值只在组件定义时求值一次，导致抽屉多次打开后仍显示页面加载时的时间/格式。
@@ -118,14 +96,12 @@ Component({
           formatTime: formatDisplayTime(time),
         });
       }
-      // _locationRequested 刚设为 false，无需再判断；只在新建/无定位信息时请求定位。
+      // 只在新建/无定位信息时请求定位。
       if (!this.data.info?.id && !this.data.form.diaryLat) {
-        (this as any)._locationRequested = true;
         this.requestLocation();
       }
     },
     detached: function () {
-      (this as any)._locationRequested = false;
       if ((this as any)._locationTimeoutTimer) {
         clearTimeout((this as any)._locationTimeoutTimer);
         (this as any)._locationTimeoutTimer = null;
@@ -191,6 +167,7 @@ Component({
                 cancelText: (this as any).$t('common.cancel'),
                 confirmText: (this as any).$t('noteEdit.openSettings'),
                 confirmType: 'default',
+                action: 'location',
               },
             });
           }
@@ -222,13 +199,14 @@ Component({
 
       Promise.race([locationPromise, timeoutPromise])
         .then(async ({ latitude, longitude }: any) => {
-          if (self._isDestroyed || self._isDetached) return;
+          // 与 catch 分支一致：切后台后才返回定位结果时不再发起逆向解析/常用地址请求。
+          if (self._isDestroyed || self._isDetached || self._isHidden) return;
           // 逆向解析和常用地址查询互不依赖，并行请求
           const [result, commonRes] = await Promise.all([
             getReverseAddress(latitude, longitude),
             request.get('/user/common-addresses', {}, true).catch(() => ({ data: { addresses: [] } } as any)),
           ]);
-          if (self._isDestroyed || self._isDetached) return;
+          if (self._isDestroyed || self._isDetached || self._isHidden) return;
           if (!result) {
             if (!self._isHidden) {
               wx.showToast({ title: (this as any).$t('noteEdit.locationFailNetwork'), icon: 'none', duration: 2000 });
@@ -236,9 +214,11 @@ Component({
             return;
           }
           await this._fillLocation(result, (commonRes as any)?.data?.addresses || []);
-        }).catch(() => {
+        }).catch((err: any) => {
           if (self._isDestroyed || self._isDetached || self._isHidden) return;
-          wx.showToast({ title: (this as any).$t('noteEdit.locationFailPermission'), icon: 'none', duration: 2000 });
+          // 超时/网络失败与权限拒绝区分文案，避免超时提示"权限被拒"误导用户。
+          const timedOut = err?.message === 'location timeout';
+          wx.showToast({ title: (this as any).$t(timedOut ? 'noteEdit.locationFailNetwork' : 'noteEdit.locationFailPermission'), icon: 'none', duration: 2000 });
         }).finally(() => {
           clearTimeout(timeoutTimer);
           if ((this as any)._locationTimeoutTimer === timeoutTimer) {
@@ -400,7 +380,14 @@ Component({
 
     onConfirmDialogConfirm() {
       // 关闭弹窗是用户明确操作，使用 _safeSetData 统一做生命周期守卫。
+      const action = this.data.confirmDialog.action;
       (this as any)._safeSetData({ 'confirmDialog.visible': false });
+
+      if (action === 'upgrade') {
+        wx.navigateTo({ url: '/pages/sub/Vip/Vip' });
+        return;
+      }
+
       wx.openSetting({
         success: (settingRes) => {
           if (settingRes.authSetting['scope.userLocation']) {
@@ -418,7 +405,25 @@ Component({
       (this as any)._safeSetData({ 'confirmDialog.visible': false });
     },
 
+    showStorageLimitDialog() {
+      (this as any)._safeSetData({
+        confirmDialog: {
+          visible: true,
+          title: (this as any).$t('common.tip'),
+          content: (this as any).$t('error.imageStorageLimitExceeded'),
+          cancelText: (this as any).$t('common.cancel'),
+          confirmText: (this as any).$t('vip.upgradeNow'),
+          confirmType: 'default',
+          action: 'upgrade',
+        },
+      });
+    },
+
     selectImage() {
+      const self = this as any;
+      // 上传/保存进行中禁止增删图片：uploadFile 基于提交时的快照，
+      // 期间变更会导致新图静默丢 id、已删图复活。
+      if (self._submitting || self._uploading) return;
       const MAX_IMAGES = 9;
       const remain = MAX_IMAGES - this.data.imgList.filter((i: any) => i.type !== FILE_TYPE.DELETE).length;
       if (remain <= 0) {
@@ -461,6 +466,8 @@ Component({
       });
     },
     delImage(e: { detail: any }) {
+      const self = this as any;
+      if (self._submitting || self._uploading) return;
       const { index } = e.detail;
       const item = this.data.imgList[index];
       this._safeSetData({
@@ -482,13 +489,17 @@ Component({
     async submit() {
       const self = this as any;
       if (self._isDestroyed || self._isDetached) return;
+      // 按 FP054/FP076：日记编辑为普通业务，不做函数级防重入锁；重复提交由后端兜底。
+      // _submitting 仅用于按钮 loading/disabled 展示与提交期间禁止改图。
 
       const recordText = (this.data.form.recordText || '').trim();
       if ([...recordText].length > 140) {
         wx.showToast({ title: (this as any).$t('noteEdit.textMaxLength'), icon: 'none' });
         return;
       }
-      if (!this.data.form.date || !this.data.form.time || !this.data.form.diaryAddress || !this.data.form.diaryLat) {
+      // diaryLat 为数字 0（赤道）不应被误判为缺省；统一用空串/空值判断。
+      if (!this.data.form.date || !this.data.form.time || !this.data.form.diaryAddress
+        || this.data.form.diaryLat === '' || this.data.form.diaryLat == null) {
         wx.showToast({ title: (this as any).$t('noteEdit.requiredFields'), icon: 'none' });
         return;
       }
@@ -501,9 +512,12 @@ Component({
       self._submitting = true;
 
       try {
-        const hasUpload = this.data.imgList.some((item: any) => item.type === FILE_TYPE.TO_BE_UPLOADED);
-        const hasDelete = this.data.imgList.some((item: any) => item.type === FILE_TYPE.DELETE);
-        const existingUploadedIds: string[] = this.data.imgList
+        // 提交时拍定 imgList 快照：上传是异步的，期间若 imgList 被增删（尽管有守卫，
+        // 仍防外部路径），重建结果与上传的 imageIds 会错位（新图丢 id/已删图复活）。
+        const imgSnapshot = this.data.imgList.map((item: any) => ({ ...item }));
+        const hasUpload = imgSnapshot.some((item: any) => item.type === FILE_TYPE.TO_BE_UPLOADED);
+        const hasDelete = imgSnapshot.some((item: any) => item.type === FILE_TYPE.DELETE);
+        const existingUploadedIds: string[] = imgSnapshot
           .filter((item: any) => item.type === FILE_TYPE.UPLOADED && item.id)
           .map((item: any) => item.id);
         let imageIds: string[] = [];
@@ -512,10 +526,12 @@ Component({
             try { self._uploadCancelToken.cancel(); } catch {}
           }
           self._uploadCancelToken = createCancelToken();
-          imageIds = await request.uploadFile(this.data.imgList, { cancelToken: self._uploadCancelToken });
+          self._uploading = true;
+          imageIds = await request.uploadFile(imgSnapshot, { cancelToken: self._uploadCancelToken });
+          self._uploading = false;
           self._uploadCancelToken = null;
           if (self._isDestroyed || self._isDetached) return;
-          const newImgList = [...this.data.imgList];
+          const newImgList = imgSnapshot;
           const existingUploadedCount = newImgList.filter((item: any) => item.type === FILE_TYPE.UPLOADED && item.id).length;
           const newIds = imageIds.slice(existingUploadedCount);
           let newIdIndex = 0;
@@ -561,6 +577,10 @@ Component({
       } catch (error: any) {
         if (!self._isAlive()) return;
         if (error?.message === 'request:abort') return;
+        if (error?.code === 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED') {
+          this.showStorageLimitDialog();
+          return;
+        }
         if (!error?._handledByModal) {
           wx.showToast({ title: getErrorMessage(error, (this as any).$t('noteEdit.saveFail')), icon: 'none' });
         }
@@ -568,6 +588,9 @@ Component({
         self._saveCancelToken = null;
         self._uploadCancelToken = null;
         self._submitting = false;
+        // 上传失败/取消/超限时 _uploading 只在成功路径（L531）复位，需在此显式复位，
+        // 否则 selectImage/delImage 被 _uploading 永久拦截，本页无法再增删图片。
+        self._uploading = false;
       }
     },
   },

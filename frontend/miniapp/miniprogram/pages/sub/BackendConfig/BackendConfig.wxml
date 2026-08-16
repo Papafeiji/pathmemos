@@ -58,10 +58,10 @@
   </scroll-view>
 
   <view class="tool" wx:if="{{enabled || currentMode === 'private'}}">
-    <view wx:if="{{enabled}}" class="tool-btn test {{testing ? 'disabled' : ''}}" bindtap="testConnection">
+    <view wx:if="{{enabled}}" class="tool-btn test {{testing || saving ? 'disabled' : ''}}" disabled="{{testing || saving}}" bindtap="testConnection">
       {{testing ? _i18n['backendConfig.testing'] : _i18n['backendConfig.testConnection']}}
     </view>
-    <view class="tool-btn save {{saving ? 'disabled' : ''}}" bindtap="save">
+    <view class="tool-btn save {{testing || saving ? 'disabled' : ''}}" disabled="{{testing || saving}}" bindtap="save">
       {{saving ? _i18n['backendConfig.saving'] : _i18n['backendConfig.save']}}
     </view>
   </view>

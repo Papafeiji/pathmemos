@@ -31,13 +31,13 @@ import (
 )
 
 const (
-	inviteShortCodePrefix   = ""
 	inviteShortCodeCacheKey = "invite:code:%s"
 	inviteShortCodeCacheTTL = 30 * 24 * time.Hour
 	inviteQRCodeCacheKey    = "invite:qrcode:%s"
 	inviteQRCodeCacheTTL    = 6 * 24 * time.Hour
 	inviteQRCodeTargetRatio = 0.20
 	inviteQRCodeMargin      = 40
+	inviteQRCodeInnerOffset = 300 // B5-15：二维码距右下角的额外内缩像素
 	inviteShortCodeLen      = 8
 )
 
@@ -86,6 +86,29 @@ func (g *QRCodeGenerator) generate(ctx context.Context, rdb *redis.Client, userI
 		}
 		if err != nil && err != redis.Nil {
 			slog.WarnContext(ctx, "read invite qrcode cache failed", slog.String("user_id", userID), slog.Bool("raw", raw), slog.Any("error", err))
+		}
+
+		// 并发/快速重复调用会互删对方刚创建的文件（并缓存指向已删文件的 URL 6 天），
+		// 用按用户的 Redis 锁串行化生成：未抢到锁时短暂等待缓存落盘后直接返回。
+		lockKey := "invite:qrcode:gen:" + userID
+		lockClient := db.NewLock(rdb)
+		ok, token, lockErr := lockClient.TryLock(ctx, lockKey, 15*time.Second)
+		if lockErr == nil && ok {
+			defer lockClient.Unlock(context.WithoutCancel(ctx), lockKey, token) //nolint:errcheck
+		} else if lockErr == nil {
+			for i := 0; i < 10; i++ {
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-time.After(100 * time.Millisecond):
+				}
+				if cached, cerr := rdb.Get(ctx, cacheKey).Result(); cerr == nil && cached != "" {
+					return cached, nil
+				}
+			}
+			slog.WarnContext(ctx, "invite qrcode generation lock not acquired, falling through", slog.String("user_id", userID), slog.Bool("raw", raw))
+		} else {
+			slog.WarnContext(ctx, "invite qrcode lock error, falling through", slog.String("user_id", userID), slog.Bool("raw", raw), slog.Any("error", lockErr))
 		}
 	}
 
@@ -182,7 +205,12 @@ func (g *QRCodeGenerator) generate(ctx context.Context, rdb *redis.Client, userI
 	}
 
 	// DB 提交成功后再清理旧物理文件；清理失败可接受少量孤儿文件。
+	// 并发生成时新旧文件路径相同（SaveSystemWithName 按 月份+shortCode 确定性命名），
+	// 删掉同路径"旧"文件会误删刚写入的新文件，需跳过。
 	for _, f := range oldFiles {
+		if f.Path == key {
+			continue
+		}
 		if delErr := g.storage.DeleteFile(f.Path, f.StorageType); delErr != nil {
 			slog.WarnContext(ctx, "delete old invite qrcode physical file failed", slog.String("path", f.Path), slog.String("user_id", userID), slog.Any("error", delErr))
 		}
@@ -330,7 +358,7 @@ func (g *QRCodeGenerator) composite(qrBytes []byte) ([]byte, error) {
 	draw.Draw(dst, bounds, bgImg, bounds.Min, draw.Src)
 
 	margin := inviteQRCodeMargin
-	offset := 300
+	offset := inviteQRCodeInnerOffset
 	x := width - scaledQR.Bounds().Dx() - margin - offset
 	y := height - scaledQR.Bounds().Dy() - margin - offset
 	if x < 0 {

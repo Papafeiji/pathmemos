@@ -14,7 +14,7 @@ Page({
     authUrl: '',
     mcpConfigText: '',
     loading: false,
-    activeTab: 'input' as 'input' | 'query',
+    activeTab: 'mcp' as 'mcp' | 'connector' | 'http',
     confirmDialog: {
       visible: false,
       title: '',
@@ -109,15 +109,24 @@ Page({
       return;
     }
     if ((this as any)._isDestroyed || (this as any)._isHidden) {
-      (this as any)._safeSetData({ ...nextData, loading: false });
+      (this as any)._safeSetData({ ...nextData, loading: false, ...this._tabFallback(nextData.authUrl) });
       return;
     }
-    (this as any)._safeSetData({ ...nextData, loading: false });
+    (this as any)._safeSetData({ ...nextData, loading: false, ...this._tabFallback(nextData.authUrl) });
+  },
+
+  // 开源版/无 Worker 入口时后端不返回 authUrl，"AI 连接器" Tab 会隐藏，
+  // 若当前停留在该 Tab 需回退到默认 Tab，避免内容区空白。
+  _tabFallback(authUrl: string) {
+    if (!authUrl && this.data.activeTab === 'connector') {
+      return { activeTab: 'mcp' as const };
+    }
+    return {};
   },
 
   switchTab(e: any) {
     const tab = e.currentTarget.dataset.tab;
-    if (!tab || (tab !== 'input' && tab !== 'query')) return;
+    if (tab !== 'mcp' && tab !== 'connector' && tab !== 'http') return;
     (this as any)._safeSetData({ activeTab: tab });
   },
 
@@ -152,6 +161,7 @@ Page({
         memoryUrl: info?.memoryUrl || `${getBaseURL()}/mcp/memories`,
         authUrl: info?.authUrl || '',
         mcpConfigText: config ? JSON.stringify(config, null, 2) : '',
+        ...this._tabFallback(info?.authUrl || ''),
       });
       wx.showToast({ title: (this as any).$t('mcp.generateSuccess'), icon: 'success' });
     } catch (err: any) {
@@ -192,16 +202,30 @@ Page({
       wx.showToast({ title: (this as any).$t('mcp.noKeyToCopy'), icon: 'none' });
       return;
     }
+    this._copyText(key);
+  },
+
+  onCopyConfig() {
+    if (!this.data.mcpConfigText) return;
+    this._copyText(this.data.mcpConfigText);
+  },
+
+  onCopyAuthUrl() {
+    if (!this.data.authUrl) return;
+    this._copyText(this.data.authUrl);
+  },
+
+  _copyText(text: string) {
     const self = this as any;
     wx.setClipboardData({
-      data: key,
+      data: text,
       success: () => {
         if (self._isDestroyed || self._isHidden) return;
-        wx.showToast({ title: (this as any).$t('mcp.copied'), icon: 'success' });
+        wx.showToast({ title: self.$t('mcp.copied'), icon: 'success' });
       },
       fail: () => {
         if (self._isDestroyed || self._isHidden) return;
-        wx.showToast({ title: (this as any).$t('mcp.copyFail'), icon: 'none' });
+        wx.showToast({ title: self.$t('mcp.copyFail'), icon: 'none' });
       },
     });
   },

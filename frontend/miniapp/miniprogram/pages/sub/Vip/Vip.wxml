@@ -51,7 +51,7 @@
       </view>
       <view class="tip">{{_i18n['vip.moreTip']}}</view>
     </view>
-    <view class="pay-card-view" wx:if="{{paymentAvailable && vipInfo.receivedFreeVip}}">
+    <view class="pay-card-view" wx:if="{{paymentAvailable && (vipInfo.receivedFreeVip || !freeVipAvailable)}}">
       <view
         bindtap="onSelectPlan"
         data-commodity="{{item}}"
@@ -75,7 +75,7 @@
     <view class="btn-view">
       <view
         bindtap="claimFreeVip"
-        wx:if="{{!vipInfo.receivedFreeVip}}"
+        wx:if="{{freeVipAvailable && !vipInfo.receivedFreeVip}}"
         class="free {{claiming ? 'disabled' : ''}}"
         disabled="{{claiming}}"
       >{{claiming ? _i18n['vip.claiming'] : _i18n['vip.freeMonth']}}</view>

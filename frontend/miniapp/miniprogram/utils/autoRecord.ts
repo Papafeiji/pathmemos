@@ -7,7 +7,12 @@ import { logger } from './logger';
 const CENTROID_CALC_INTERVAL_MS = 30_000;     
 const BACKGROUND_CENTROID_CALC_INTERVAL_MS = 120_000; // 后台降低计算频率，省电
 const CENTROID_WINDOW_TIME_MS = 60_000;       
+// 后台定位回调频率低且不稳定（Android 微信静止时 1-5 分钟/次），60 秒窗口凑不齐
+// CENTROID_MIN_POINTS 个点导致后台驻留检测失效；后台窗口放宽到 10 分钟，
+// 且后台最少点数降为 2（两点质心即可，配合 300m 静止阈值仍可靠）。
+const BACKGROUND_CENTROID_WINDOW_TIME_MS = 600_000;
 const CENTROID_MIN_POINTS = 3;                
+const BACKGROUND_CENTROID_MIN_POINTS = 2;
 const CENTROID_MAX_POINTS = 200;              
 const BACKGROUND_CENTROID_MAX_POINTS = 50;    // 后台保留更少点，降低内存与计算
 const STATIONARY_THRESHOLD_METERS = 300;
@@ -59,7 +64,10 @@ let _enabledInMemory: boolean | null = null;
 
 
 let _lastVipCheckTime = 0;
-let _lastVipResult = false;
+// 三态：null=尚无判定（未知态，禁止关闭自动记录）；true/false=已确认。
+let _lastVipResult: boolean | null = null;
+// 未知态 fetch 节流时间戳（与判定缓存 _lastVipCheckTime 分离，避免未知被当非 VIP）。
+let _lastVipFetchAt = 0;
 
 
 let _opening = false;
@@ -67,6 +75,7 @@ let _restoring = false;
 let _closingGeneration = 0;
 let _lifecycleCancelToken: any = null;
 let _activeCancelToken: any = null;
+let _justFromSettings = false;
 
 
 let _appBackgroundedAt = 0;
@@ -83,6 +92,12 @@ let _lastActiveTouchTime = 0;
 let _fallbackTimer: any = null;
 let _fallbackPending = false;
 let _iosResumeTimer: any = null;
+
+// 定位监听注册状态（进程内存态）：小程序被杀后台后重新进入时该值为 false，
+// 用于判断是否需要重建 startLocationUpdateBackground + onLocationChange。
+let _listenerRegistered = false;
+
+const _locationListening = (): boolean => _listenerRegistered;
 
 
 const _nextReportBatchSeq = (): number => {
@@ -126,6 +141,12 @@ const _isBackground = (): boolean => _appBackgroundedAt > 0;
 const _getCentroidCalcInterval = (): number =>
   _isBackground() ? BACKGROUND_CENTROID_CALC_INTERVAL_MS : CENTROID_CALC_INTERVAL_MS;
 
+const _getCentroidWindowTime = (): number =>
+  _isBackground() ? BACKGROUND_CENTROID_WINDOW_TIME_MS : CENTROID_WINDOW_TIME_MS;
+
+const _getCentroidMinPoints = (): number =>
+  _isBackground() ? BACKGROUND_CENTROID_MIN_POINTS : CENTROID_MIN_POINTS;
+
 const _getCentroidMaxPoints = (): number =>
   _isBackground() ? BACKGROUND_CENTROID_MAX_POINTS : CENTROID_MAX_POINTS;
 
@@ -134,12 +155,19 @@ const _updateVipCache = (isVip: boolean) => {
   _lastVipCheckTime = Date.now();
 };
 
-const _isVipFromCache = (): boolean => {
-  if (_lastVipCheckTime > 0 && Date.now() - _lastVipCheckTime < VIP_CHECK_INTERVAL_MS) {
+// 返回三态：true=确认 VIP、false=确认非 VIP、null=未知（VIP 信息尚未获取，
+// 如 storage 被微信清理/首次运行）。未知时禁止关闭自动记录，避免误杀。
+const _isVipFromCache = (): boolean | null => {
+  if (_lastVipResult !== null && _lastVipCheckTime > 0 && Date.now() - _lastVipCheckTime < VIP_CHECK_INTERVAL_MS) {
     return _lastVipResult;
   }
   const vipInfo = getVipInfo();
-  const isVip = vipInfo?.isVip > 0;
+  if (!vipInfo) {
+    // 未知态：不写 _lastVipCheckTime / _lastVipResult，保持 null 让调用方跳过；
+    // fetch 节流由调用方用独立的 _lastVipFetchAt 控制。
+    return null;
+  }
+  const isVip = vipInfo.isVip > 0;
   _updateVipCache(isVip);
   return isVip;
 };
@@ -159,6 +187,9 @@ const _pushStayPoint = (lat: number, lon: number, timestamp: number) => {
 let _flushPromise: Promise<void> | null = null;
 
 let _reportPromise: Promise<void> | null = null;
+// _reporting 单飞标志：restore/close 路径会直接调用 _tryReportStorage，与 push 路径的
+// _serialFlushAndReport 可能并发；用进程内标志短路，避免两个上报循环同时 load/report/clear。
+let _reporting = false;
 
 const _shouldSkipReportDueToBackoff = (): boolean => {
   if (_reportFailureCount === 0) return false;
@@ -178,8 +209,7 @@ const _serialFlushAndReport = async (cancelToken?: any): Promise<void> => {
     }
     try {
       await _tryReportStorage(cancelToken);
-    } catch (e) {
-      console.error('try report storage failed', e);
+  } catch {
     }
   })();
   try {
@@ -283,7 +313,7 @@ const _setRecordingState = (enabled: boolean) => {
 
 
 const _syncBackendConfig = async (enabled: boolean, cancelToken?: any) => {
-  await request.put('/auto-record/config', { data: { enabled }, cancelToken }, true, 8000);
+  await request.put('/auto-record/config', { data: { enabled }, cancelToken }, true, 5000);
 };
 
 
@@ -308,6 +338,7 @@ const _stopLocationUpdateBackground = () => {
   if (typeof wx.stopLocationUpdate === 'function') {
     wx.stopLocationUpdate();
   }
+  _listenerRegistered = false;
 };
 
 
@@ -382,9 +413,10 @@ const _reportStayPoints = async (points: StayPoint[], cancelToken?: any): Promis
     _reportFailureCount++;
     _lastReportFailureTime = Date.now();
     if (_isTokenExpiredError(error)) {
-      // token 过期后停止监听，但保留本地 storage 开关，重新登录后 tryRestoreAutoRecord
-      // 会自动恢复，避免用户手动重新开启（AGENTS.md §3.7）。
+      // token 过期后停止监听，但保留本地 storage 开关；安排退避重试，
+      // 重新登录成功后 tryRestoreAutoRecord 自动恢复（AGENTS.md §3.7）。
       _resetState(true);
+      _scheduleRestoreRetry();
       return false;
     }
     return false;
@@ -392,22 +424,50 @@ const _reportStayPoints = async (points: StayPoint[], cancelToken?: any): Promis
 };
 
 
+// _reportedLeadingCount 记录 storage 中"已上报但清理失败"的前缀数量：
+// 上报成功而清空失败时，同批数据仍留在 storage，退避重试若整批重报会造成后端重复轨迹
+// （后端无按批去重约束）。按数量跳过已上报前缀，只重试清空。
+let _reportedLeadingCount = 0;
+
 const _tryReportStorage = async (cancelToken?: any): Promise<boolean> => {
-  const points = await _loadFromStorage();
-  if (points.length === 0) return true;
-  const ok = await _reportStayPoints(points, cancelToken);
-  if (!ok) return false;
+  if (_reporting) return true;
+  _reporting = true;
+  try {
+    const points = await _loadFromStorage();
+    if (points.length === 0) return true;
+    const toReport = points.slice(Math.min(_reportedLeadingCount, points.length));
+    if (toReport.length === 0) {
+      // 全部已上报：只重试清空 storage，不再重报。
+      return _clearReportedStorage();
+    }
+    const ok = await _reportStayPoints(toReport, cancelToken);
+    if (!ok) return false;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        wx.setStorage({ key: STORAGE_KEY_STAY_POINTS, data: [], success: () => resolve(), fail: reject });
+      });
+      _reportedLeadingCount = 0;
+    } catch (e) {
+      logger.error('autoRecord clear storage failed after report', e);
+      // 本批已成功上报：标记为已上报前缀，后续只清空不再重报。
+      _reportedLeadingCount = points.length;
+      _reportFailureCount++;
+      _lastReportFailureTime = Date.now();
+    }
+    return true;
+  } finally {
+    _reporting = false;
+  }
+};
+
+const _clearReportedStorage = async (): Promise<boolean> => {
   try {
     await new Promise<void>((resolve, reject) => {
       wx.setStorage({ key: STORAGE_KEY_STAY_POINTS, data: [], success: () => resolve(), fail: reject });
     });
+    _reportedLeadingCount = 0;
   } catch (e) {
-    // 已上报但清理失败：记录错误、进入退避并返回 false，让同批数据在退避后重试，
-    // 避免返回 true 后重复上传导致后端轨迹/日记重复（AGENTS.md §3.7）。
-    logger.error('autoRecord clear storage failed after report', e);
-    _reportFailureCount++;
-    _lastReportFailureTime = Date.now();
-    return false;
+    logger.error('autoRecord clear reported storage failed', e);
   }
   return true;
 };
@@ -416,6 +476,7 @@ const LOCATION_TIMEOUT_MS = 15000;
 
 interface _GetCurrentLocationOptions {
   highAccuracyExpireTime?: number;
+  highAccuracy?: boolean;
 }
 
 const _getCurrentLocation = (
@@ -431,7 +492,7 @@ const _getCurrentLocation = (
     }, timeoutMs);
     wx.getLocation({
       type: 'gcj02',
-      isHighAccuracy: true,
+      isHighAccuracy: opts.highAccuracy ?? true,
       highAccuracyExpireTime: opts.highAccuracyExpireTime ?? 5000,
       success: (res) => {
         if (settled) return;
@@ -450,18 +511,17 @@ const _getCurrentLocation = (
 };
 
 
-const _saveFirstRecord = async (cancelToken?: any): Promise<string | null> => {
-  const loc = await _getCurrentLocation();
+const _saveFirstRecord = async (): Promise<void> => {
+  const loc = await _getCurrentLocation(10000, { highAccuracy: false, highAccuracyExpireTime: 2000 });
   const res: any = await request.post('/diary/details/auto', {
     data: {
       lat: _roundCoord(loc.latitude),
       lon: _roundCoord(loc.longitude),
     },
-    cancelToken,
   }, true, 10000, true);
-  const entryID = res?.data?.id || null;
-  _refreshIndexList();
-  return entryID;
+  if (res?.data?.id) {
+    _refreshIndexList();
+  }
 };
 
 
@@ -484,16 +544,34 @@ export const onLocationChange = (res: any) => {
       return;
     }
 
-    if (!_isVipFromCache()) {
-      closeAutoRecord().catch(() => {});
-      return;
-    }
-
     // 心跳：每 30 分钟上报一次存活信号，跟随 onLocationChange 触发，不增加独立定时器耗电。
     // 用于小程序订阅消息和服务号消息的异常告警检测。
+    // 注意：心跳必须放在 VIP 检查之前——VIP 缓存缺失/查询失败时仍要报活，
+    // 否则网络抖动期间后端误判"用户失联"触发异常告警。
     if (now - _lastActiveTouchTime >= ACTIVE_TOUCH_INTERVAL_MS) {
       _lastActiveTouchTime = now;
       _touchActive();
+    }
+
+    const vipState = _isVipFromCache();
+    if (vipState === null) {
+      // VIP 状态未知（缓存缺失）：节流异步刷新确认，本次回调跳过，不关闭自动记录。
+      // 避免 storage 被清理后把用户已开启的自动记录误杀；fetch 失败时保持未知，绝不回落为非 VIP。
+      const now = Date.now();
+      if (now - _lastVipFetchAt >= VIP_CHECK_INTERVAL_MS) {
+        _lastVipFetchAt = now;
+        fetchVipInfo().then((info) => {
+          _updateVipCache(info?.isVip > 0);
+          if (!(info?.isVip > 0)) {
+            closeAutoRecord().catch(() => {});
+          }
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (!vipState) {
+      closeAutoRecord().catch(() => {});
+      return;
     }
 
     const accuracy = typeof res.accuracy === 'number' ? res.accuracy : 0;
@@ -522,7 +600,7 @@ export const onLocationChange = (res: any) => {
     if (!isBackgroundStationarySaved) {
       _window.push({ latitude: lat, longitude: lon, accuracy, timestamp: pointTimestamp });
 
-      const cutoff = pointTimestamp - CENTROID_WINDOW_TIME_MS;
+      const cutoff = pointTimestamp - _getCentroidWindowTime();
       while (_window.length > 0 && _window[0].timestamp < cutoff) {
         _window.shift();
       }
@@ -561,7 +639,7 @@ export const onLocationChange = (res: any) => {
       return;
     }
 
-    if (now - _lastCentroidCalcTime < _getCentroidCalcInterval() || _window.length < CENTROID_MIN_POINTS) {
+    if (now - _lastCentroidCalcTime < _getCentroidCalcInterval() || _window.length < _getCentroidMinPoints()) {
       return;
     }
 
@@ -639,6 +717,7 @@ const _startLocationUpdate = (): Promise<void> => {
       success: () => {
         wx.offLocationChange(onLocationChange);
         wx.onLocationChange(onLocationChange);
+        _listenerRegistered = true;
         _startFallbackTimer();
         resolve();
       },
@@ -650,7 +729,7 @@ const _startLocationUpdate = (): Promise<void> => {
 };
 
 
-const _doOpenAutoRecord = async (onDone: (ok: boolean) => void, startGeneration: number) => {
+const _doOpenAutoRecord = async (onDone: (ok: boolean, err?: any) => void, startGeneration: number) => {
   if (_lifecycleCancelToken) {
     try { _lifecycleCancelToken.cancel(); } catch {}
   }
@@ -665,21 +744,30 @@ const _doOpenAutoRecord = async (onDone: (ok: boolean) => void, startGeneration:
   try {
     try { await _syncBackendConfig(true, token); } catch (e) { logger.error('autoRecord step1 syncBackendConfig failed', e); throw e; }
     _checkAborted();
-    try { await request.get('/auto-record/config', { cancelToken: token }); } catch (e) { logger.error('autoRecord step2 getConfig failed', e); throw e; }
-    _checkAborted();
-    try { await _saveFirstRecord(token); } catch (e) { logger.error('autoRecord step3 saveFirstRecord failed', e); throw e; }
-    _checkAborted();
-    try { await _startLocationUpdate(); } catch (e) { logger.error('autoRecord step4 startLocationUpdate failed', e); throw e; }
+    try { await _startLocationUpdate(); } catch (e) { logger.error('autoRecord step2 startLocationUpdate failed', e); throw e; }
     _checkAborted();
 
     _setRecordingState(true);
+    _clearRestoreRetry();
+    _restoreRetryDelay = 60_000;
     onDone(true);
+
+    _saveFirstRecord().catch(() => {});
   } catch {
-    try {
-      await _syncBackendConfig(false);
-    } catch {
+    // 仅业务失败才反向关闭后端开关；取消/超时/关闭触发的失败交由超时处理器或 closeAutoRecord
+    // 统一裁决，避免与"后端已开启"的恢复逻辑竞态导致"本地 on + 后端 off"不一致。
+    if (!token.isCancelled()) {
+      try {
+        await _syncBackendConfig(false);
+      } catch {
+      }
     }
     _resetState();
+    if (_justFromSettings) {
+      _justFromSettings = false;
+      onDone(false, { needRefresh: true });
+      return;
+    }
     onDone(false);
   } finally {
     if (_lifecycleCancelToken === token) {
@@ -694,21 +782,44 @@ export const openAutoRecord = (): Promise<boolean> => {
     return Promise.reject(new Error('openAutoRecord in progress'));
   }
   _opening = true;
+  _justFromSettings = false;
   const startGeneration = ++_closingGeneration;
   return new Promise((resolve, reject) => {
     let timeoutFired = false;
-    const timeout = setTimeout(() => {
+    const timeout = setTimeout(async () => {
       timeoutFired = true;
       _opening = false;
       // 超时后立即取消进行中的请求并停止定位，避免后台偷偷运行
       if (_lifecycleCancelToken) {
         try { _lifecycleCancelToken.cancel(); } catch {}
       }
-      _resetState();
+      // F1-15：超时可能发生在后端已接受 enabled=true（响应丢失/挂起）之后，
+      // 先查后端真实状态再决定本地开关，避免"本地置 off / 后端仍 on"的不一致窗口。
+      // 查询失败或后端未开启时按关闭处理。
+      let backendEnabled = false;
+      try {
+        const query = request.get('/auto-record/config', {}, true);
+        backendEnabled = await Promise.race([
+          query.then((res: any) => res?.data?.enabled === true),
+          new Promise<boolean>((r2) => setTimeout(() => r2(false), 5000)),
+        ]);
+      } catch (e) {
+        logger.warn('autoRecord open timeout: 查询后端配置失败，按关闭处理', e);
+      }
+      if (backendEnabled) {
+        // 后端已开启：保留本地开启态，不反向关闭后端开关。
+        // R4：立即尝试重建后台定位监听（原来要等下次进入小程序才恢复，
+        // 存在"界面显示已开启但监听未建立"的窗口）。
+        _setRecordingState(true);
+        logger.warn('autoRecord open timed out but backend enabled, keep local state on and restore immediately');
+        tryRestoreAutoRecord().catch(() => {});
+      } else {
+        _resetState();
+      }
       reject(new Error('openAutoRecord timeout'));
     }, 30000);
 
-    const finish = (ok: boolean) => {
+    const finish = (ok: boolean, err?: any) => {
       clearTimeout(timeout);
       if (timeoutFired) {
         return;
@@ -717,7 +828,7 @@ export const openAutoRecord = (): Promise<boolean> => {
       if (ok) {
         resolve(true);
       } else {
-        reject(new Error('openAutoRecord failed'));
+        reject(err || new Error('openAutoRecord failed'));
       }
     };
 
@@ -743,7 +854,7 @@ export const openAutoRecord = (): Promise<boolean> => {
 };
 
 
-function _showLocationSettingModal(onDone: (ok: boolean) => void, startGeneration: number) {
+function _showLocationSettingModal(onDone: (ok: boolean, err?: any) => void, startGeneration: number) {
   wx.showModal({
     title: '需要后台定位权限',
     content: '请开启"离开后允许"定位权限，以便后台记录行程',
@@ -763,6 +874,7 @@ function _showLocationSettingModal(onDone: (ok: boolean) => void, startGeneratio
             if (settingTimedOut) return;
             if (!_opening) return;
             if ((settingRes.authSetting as any)['scope.userLocationBackground']) {
+              _justFromSettings = true;
               _doOpenAutoRecord(onDone, startGeneration);
             } else {
               _opening = false;
@@ -824,14 +936,16 @@ const _resetState = (preserveStorage = false) => {
   _reportFailureCount = 0;
   _lastReportFailureTime = 0;
   _lastActiveTouchTime = 0;
-  _lastVipResult = false;
+  _lastVipResult = null;
   _lastVipCheckTime = 0;
+  _lastVipFetchAt = 0;
   _fallbackPending = false;
 };
 
 
 export const closeAutoRecord = async (): Promise<void> => {
   _closingGeneration++;
+  _clearRestoreRetry();
   if (_lifecycleCancelToken) {
     try { _lifecycleCancelToken.cancel(); } catch {}
     _lifecycleCancelToken = null;
@@ -847,13 +961,16 @@ export const closeAutoRecord = async (): Promise<void> => {
       return;
     }
 
+    // 先上报积压驻留点再关闭后端开关：若先关开关，后端
+    // ListPendingAutoRecordUsers 不再处理该用户，最后一批轨迹
+    // 会被静默丢弃，导致关闭前最后停留的地点不生成日记。
     try {
-      await _syncBackendConfig(false);
+      await _serialFlushAndReport(closeToken);
     } catch {
     }
 
     try {
-      await _serialFlushAndReport(closeToken);
+      await _syncBackendConfig(false);
     } catch {
     }
   } catch {
@@ -881,16 +998,41 @@ const _touchActive = () => {
     });
 };
 
-export const tryRestoreAutoRecord = async () => {
+let _restoreRetryTimer: any = null;
+let _restoreRetryDelay = 60_000;
+const RESTORE_RETRY_MAX_DELAY = 5 * 60 * 1000;
+
+const _clearRestoreRetry = () => {
+  if (_restoreRetryTimer != null) {
+    clearTimeout(_restoreRetryTimer);
+    _restoreRetryTimer = null;
+  }
+};
+
+// 恢复失败后指数退避重试，最多等 5 分钟；成功后由 tryRestoreAutoRecord 重置。
+// 保证用户打开小程序后即使瞬时网络失败/后端抖动，自动记录也能自行恢复，
+// 不依赖用户再次手动打开（AGENTS.md §3.7）。
+const _scheduleRestoreRetry = () => {
+  _clearRestoreRetry();
+  const delay = _restoreRetryDelay;
+  _restoreRetryDelay = Math.min(_restoreRetryDelay * 2, RESTORE_RETRY_MAX_DELAY);
+  _restoreRetryTimer = setTimeout(() => {
+    _restoreRetryTimer = null;
+    tryRestoreAutoRecord().catch(() => {});
+  }, delay);
+};
+
+export const tryRestoreAutoRecord = async (): Promise<boolean> => {
   if (_opening) {
-    return;
+    return false;
   }
   if (!_isRecordingEnabled()) {
+    _clearRestoreRetry();
     _resetState();
-    return;
+    return false;
   }
   if (_restoring) {
-    return;
+    return false;
   }
   _restoring = true;
   const startGeneration = _closingGeneration;
@@ -899,7 +1041,42 @@ export const tryRestoreAutoRecord = async () => {
   }
   const token = createCancelToken();
   _lifecycleCancelToken = token;
+  // 看门狗：恢复流程意外挂起（如小程序进后台 JS 冻结）时强制复位 _restoring，
+  // 避免下次进入小程序时恢复被单飞标志永久阻断。60 秒覆盖网络请求 20s 超时×2 + 缓冲。
+  const _restoreWatchdog = setTimeout(() => {
+    if (_restoring && _lifecycleCancelToken === token) {
+      try { token.cancel(); } catch {}
+      _restoring = false;
+      _scheduleRestoreRetry();
+    }
+  }, 60_000);
   try {
+    // 1. 本地先行恢复定位监听（不依赖网络）：小程序被杀后台后重新进入时，
+    //    监听必须立即重建；网络校验（VIP/config）异步后置，失败再停止。
+    if (_isRecordingEnabled() && _closingGeneration === startGeneration) {
+      await new Promise<void>((resolve) => {
+        wx.offLocationChange(onLocationChange);
+        wx.startLocationUpdateBackground({
+          success: () => {
+            if (_closingGeneration !== startGeneration || !_isRecordingEnabled()) {
+              resolve();
+              return;
+            }
+            _listenerRegistered = true;
+            _setRecordingState(true);
+            wx.onLocationChange(onLocationChange);
+            _startFallbackTimer();
+            resolve();
+          },
+          fail: () => {
+            // 权限不足/系统限制：保留开关并退避重试（用户重新授权后可恢复）
+            resolve();
+          },
+        });
+      });
+    }
+
+    // 2. 网络校验：上报积压轨迹、VIP 校验、后端开关校验
     await _tryReportStorage(token);
 
     let vipInfo;
@@ -908,58 +1085,75 @@ export const tryRestoreAutoRecord = async () => {
     } catch (error) {
       // VIP 查询失败时不清空本地 storage 开关，但停止监听并清空内存状态，
       // 避免 _enabledInMemory 与实际后台监听不一致（AGENTS.md §3.7）。
+      // 安排退避重试，网络恢复后自动恢复监听。
       logger.warn('fetch vip failed during restore', error);
       _resetState(true);
-      return;
+      _scheduleRestoreRetry();
+      return false;
     }
     if (_closingGeneration !== startGeneration) {
       _resetState();
-      return;
+      return false;
     }
     const isVip = vipInfo?.isVip > 0;
     _updateVipCache(isVip);
     if (!isVip) {
+      _clearRestoreRetry();
       await closeAutoRecord();
-      return;
+      return false;
     }
 
     const { data } = await request.get('/auto-record/config', { cancelToken: token });
     if (_closingGeneration !== startGeneration) {
       _resetState();
-      return;
+      return false;
     }
     const enabled = data?.enabled ?? false;
 
-    if (enabled) {
-      wx.offLocationChange(onLocationChange);
+    if (!enabled) {
+      // 后端已关闭自动记录，必须确保本地后台定位停止，避免定位残留
+      _clearRestoreRetry();
+      _resetState();
+      return false;
+    }
+    // 后端确认开启：监听已在步骤 1 恢复；兜底再确保一次（步骤 1 可能因
+    // generation 变化而跳过）。
+    if (!_locationListening()) {
       await new Promise<void>((resolve) => {
         wx.startLocationUpdateBackground({
           success: () => {
-            if (_closingGeneration !== startGeneration) {
-              _resetState();
-              resolve();
-              return;
+            if (_closingGeneration === startGeneration && _isRecordingEnabled()) {
+              _listenerRegistered = true;
+              _setRecordingState(true);
+              wx.onLocationChange(onLocationChange);
+              _startFallbackTimer();
             }
-            _setRecordingState(true);
-            wx.onLocationChange(onLocationChange);
-            _startFallbackTimer();
             resolve();
           },
           fail: () => {
-            _resetState();
-            _syncBackendConfig(false).catch(() => {});
             resolve();
           },
         });
       });
-    } else {
-      // 后端已关闭自动记录，必须确保本地后台定位停止，避免定位残留
-      _resetState();
     }
+    // 监听仍未建立（权限被系统收回且短期无法恢复）：保留开关并安排退避重试，
+    // 不能返回 true 清除重试定时器，否则自动记录静默停摆。
+    if (!_locationListening()) {
+      _resetState(true);
+      _scheduleRestoreRetry();
+      return false;
+    }
+    _clearRestoreRetry();
+    _restoreRetryDelay = 60_000;
+    return true;
   } catch {
-    // 除 VIP 信息查询失败外，其余步骤失败统一走关闭兜底，避免后台定位残留。
-    await closeAutoRecord().catch(() => {});
+    // 恢复过程失败（网络抖动/后端瞬时不可用）时保留本地开关并安排退避重试，
+    // 不再 closeAutoRecord（避免把用户已开启的后端开关反向关掉）。
+    _resetState(true);
+    _scheduleRestoreRetry();
+    return false;
   } finally {
+    clearTimeout(_restoreWatchdog);
     if (_lifecycleCancelToken === token) {
       _lifecycleCancelToken = null;
     }
@@ -976,6 +1170,12 @@ export const onAppShow = async () => {
   _appBackgroundedAt = 0;
 
   if (!_isRecordingEnabled()) return;
+
+  // 监听兜底：开启状态但监听已丢失（微信回收进程/系统收回权限后重新进入），
+  // 主动触发一次恢复重建 startLocationUpdateBackground + onLocationChange。
+  if (!_locationListening()) {
+    tryRestoreAutoRecord().catch(() => {});
+  }
 
   try {
     const vipInfo = await fetchVipInfo();

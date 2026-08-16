@@ -63,27 +63,21 @@ FROM diary_entry_images dei
 JOIN diary_entries de ON de.id = dei.diary_entry_id
 WHERE de.diary_id = $1;
 
--- name: DeleteDiaryEntryReturningFileIDs :many
--- 在事务内锁定条目行、删除图片关联并返回 file_id，最后删除日记条目。
--- FOR UPDATE 阻止并发更新条目，确保返回的 file_id 与实际被级联删除的图片完全一致。
-WITH locked AS (
-    SELECT diary_entries.id FROM diary_entries WHERE diary_entries.id = $1 FOR UPDATE
-),
-deleted_images AS (
-    DELETE FROM diary_entry_images WHERE diary_entry_id = $1
-    RETURNING file_id
-),
-deleted_entry AS (
-    DELETE FROM diary_entries WHERE id = $1
-)
-SELECT DISTINCT file_id FROM deleted_images;
+-- name: DeleteDiaryEntryImagesReturningFileIDs :many
+-- 先删图片关联并返回 file_id，再由调用方在同一事务内删除条目。
+-- 拆成两条语句，避免数据修改 CTE 顺序不可预测导致 file_id 漏返回。
+DELETE FROM diary_entry_images WHERE diary_entry_id = $1
+RETURNING file_id;
+
+-- name: DeleteDiaryEntryByID :exec
+DELETE FROM diary_entries WHERE id = $1;
 
 -- name: GetUserLastAutoEntry :one
 SELECT id, address, detail_address
 FROM diary_entries
 WHERE created_by = $1
   AND text = '（自动记录）'
-ORDER BY record_time DESC
+ORDER BY record_time DESC NULLS LAST
 LIMIT 1;
 
 -- name: GetUserLastAutoEntryByDate :one
@@ -93,6 +87,6 @@ JOIN diaries d ON d.id = e.diary_id
 WHERE e.created_by = $1
   AND e.text = '（自动记录）'
   AND d.record_date = $2
-ORDER BY e.record_time DESC
+ORDER BY e.record_time DESC NULLS LAST
 LIMIT 1;
 

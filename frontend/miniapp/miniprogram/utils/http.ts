@@ -12,7 +12,13 @@ export { getBaseURL };
 
 export function getErrorMessage(error: any, defaultMsg: string = i18n.t('error.DEFAULT')): string {
   if (typeof error === 'string') return error;
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error) {
+    // 内部哨兵（如会话过期）不得原样展示给用户。
+    if (error.message === SESSION_EXPIRED_SENTINEL) {
+      return i18n.t('error.sessionExpired');
+    }
+    return error.message;
+  }
   return error?.msg || error?.data?.msg || error?.message || defaultMsg;
 }
 
@@ -60,9 +66,9 @@ interface _RequestOptions {
   header: Record<string, string>;
   timeout: number;
   closeTheErrorMessage?: boolean;
-  _noRetry?: boolean;
+  // 401 时不走标准会话过期处理（清 session + 哨兵），由调用方自行处理鉴权刷新（如 autoRecord 静默续登）。
+  skipAuthExpire?: boolean;
   cancelToken?: CancelToken;
-  skipAuthRefresh?: boolean;
 }
 
 function _request(options: _RequestOptions): Promise<any> {
@@ -87,7 +93,7 @@ function _request(options: _RequestOptions): Promise<any> {
         settle(() => {
           const { data, statusCode } = res;
 
-          if (statusCode === 401 && !options.skipAuthRefresh && !options._noRetry) {
+          if (statusCode === 401 && !options.skipAuthExpire) {
             clearSessionId();
             if (!options.closeTheErrorMessage) {
               _showSessionExpiredToast();
@@ -260,7 +266,8 @@ function _authHeader(): Record<string, string> {
 export const get = (
   url: string,
   { params, cancelToken }: { data?: object; params?: { [key: string]: any }; cancelToken?: CancelToken } = {},
-  closeTheErrorMessage = false
+  closeTheErrorMessage = false,
+  skipAuthExpire = false
 ): Promise<{ code: string; count?: number; data: any; extra?: any; msg: string; nextCursor?: string }> => {
   const _url = _buildUrl(url, params);
   return _request({
@@ -270,6 +277,7 @@ export const get = (
     timeout: 20000,
     closeTheErrorMessage,
     cancelToken,
+    skipAuthExpire,
   });
 };
 
@@ -278,7 +286,7 @@ export const post = (
   { data, params, cancelToken }: { data?: object; params?: { [key: string]: any }; cancelToken?: CancelToken } = {},
   closeTheErrorMessage = false,
   timeout = 20000,
-  _noRetry = false
+  skipAuthExpire = false
 ): Promise<{ code: string; count?: number; data: any; extra?: any; msg: string; nextCursor?: string }> => {
   const _url = _buildUrl(url, params);
   return _request({
@@ -289,7 +297,7 @@ export const post = (
     timeout,
     closeTheErrorMessage,
     cancelToken,
-    _noRetry,
+    skipAuthExpire,
   });
 };
 
@@ -367,25 +375,43 @@ const _uploadWithGuard = (
       success(res) {
         if (aborted) return;
         settle(() => {
+          let parsed: any;
+          let parseError = false;
+          try {
+            parsed = JSON.parse(res.data);
+          } catch {
+            parseError = true;
+          }
+
+          const code = parsed?.code;
+          const bizCode = parsed?.bizCode;
+          const effectiveCode = bizCode || code;
+          const msg = parsed?.message || parsed?.msg;
+
           if (res.statusCode && res.statusCode >= 400) {
             logger.error('wx.uploadFile HTTP error', { statusCode: res.statusCode, data: res.data });
+            const err = new Error(msg || i18n.t('error.uploadFail')) as any;
+            err.code = effectiveCode;
+            return reject(err);
+          }
+
+          if (parseError) {
+            logger.error('wx.uploadFile response parse fail', { data: res.data });
+            return reject(new Error(i18n.t('error.uploadResponseParseFail')));
+          }
+
+          if (code !== '0000') {
+            _handleResponseError({ code, bizCode, msg }, true);
+            const err = new Error(msg || i18n.t('error.uploadFail')) as any;
+            err.code = effectiveCode;
+            return reject(err);
+          }
+
+          const files = parsed?.data?.files;
+          if (!Array.isArray(files) || !files.length || !files[0].fileId) {
             return reject(new Error(i18n.t('error.uploadFail')));
           }
-          try {
-            const { data, code, msg } = JSON.parse(res.data);
-            if (code !== '0000') {
-              _handleResponseError({ code, msg }, true);
-              return reject(new Error(msg || i18n.t('error.uploadFail')));
-            }
-            const files = data?.files;
-            if (!Array.isArray(files) || !files.length || !files[0].fileId) {
-              return reject(new Error(i18n.t('error.uploadFail')));
-            }
-            resolve({ fileId: files[0].fileId, url: files[0].url || '' });
-          } catch {
-            logger.error('wx.uploadFile response parse fail', { data: res.data });
-            reject(new Error(i18n.t('error.uploadResponseParseFail')));
-          }
+          resolve({ fileId: files[0].fileId, url: files[0].url || '' });
         });
       },
       fail(errMsg) {
@@ -432,10 +458,14 @@ export const uploadFile = async (
       const results = await runWithConcurrency(uploadTasks, 3) as (string | Error)[];
       const successIds: string[] = [];
       const failedPaths: string[] = [];
+      let storageLimitError: Error | null = null;
       let allAborted = toUploadPaths.length > 0;
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
         if (r instanceof Error) {
+          if ((r as any).code === 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED') {
+            storageLimitError = r;
+          }
           if (r.message !== 'request:abort') {
             allAborted = false;
           }
@@ -452,10 +482,20 @@ export const uploadFile = async (
         if (allAborted) {
           throw new Error('request:abort');
         }
+        if (storageLimitError) {
+          const err = new Error(storageLimitError.message) as any;
+          err.code = 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED';
+          throw err;
+        }
         throw new Error(i18n.t('error.imagesUploadFail', { count: failedPaths.length }));
       }
     }
   } catch (error: any) {
+    if (error?.code === 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED') {
+      throw Object.assign(new Error(i18n.t('error.imageStorageLimitExceeded')), {
+        code: 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED',
+      });
+    }
     const errMsg = getErrorMessage(error, i18n.t('error.DEFAULT'));
     logger.error('uploadFile catch', errMsg);
     if (errMsg !== 'request:abort' && !_isCurrentPageDestroyed() && !_isCurrentPageHidden()) {
@@ -486,6 +526,11 @@ export const updateAvatar = async (path: string, { cancelToken }: { cancelToken?
     return fileUrl;
   } catch (error: any) {
     _hideLoading();
+    if (error?.code === 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED') {
+      throw Object.assign(new Error(i18n.t('error.imageStorageLimitExceeded')), {
+        code: 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED',
+      });
+    }
     const msg = getErrorMessage(error, i18n.t('error.DEFAULT'));
     if (msg !== 'request:abort' && !_isCurrentPageDestroyed() && !_isCurrentPageHidden()) {
       wx.showModal({ content: msg, showCancel: false });

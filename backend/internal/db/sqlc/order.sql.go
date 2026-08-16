@@ -29,20 +29,23 @@ func (q *Queries) CloseOrder(ctx context.Context, arg CloseOrderParams) (int64, 
 }
 
 const closeOrdersBatch = `-- name: CloseOrdersBatch :execrows
-UPDATE orders
+UPDATE orders AS o
 SET state = 'closed', updated_at = now()
-WHERE out_trade_no = ANY($1::text[])
-  AND user_id = ANY($2::text[])
-  AND state = 'pending'
+FROM unnest($2::text[]) WITH ORDINALITY AS t(no, ord)
+WHERE o.out_trade_no = t.no
+  AND o.user_id = ($1::text[])[t.ord]
+  AND o.state = 'pending'
 `
 
 type CloseOrdersBatchParams struct {
-	OutTradeNos []string `json:"outTradeNos"`
 	UserIds     []string `json:"userIds"`
+	OutTradeNos []string `json:"outTradeNos"`
 }
 
+// 两个数组按位置配对（B2-10）：out_trade_nos 展开为 (订单号, 序号)，
+// user_ids 按下标取同位置的 user_id，避免双 ANY 独立展开产生笛卡尔误关他人订单。
 func (q *Queries) CloseOrdersBatch(ctx context.Context, arg CloseOrdersBatchParams) (int64, error) {
-	result, err := q.db.Exec(ctx, closeOrdersBatch, arg.OutTradeNos, arg.UserIds)
+	result, err := q.db.Exec(ctx, closeOrdersBatch, arg.UserIds, arg.OutTradeNos)
 	if err != nil {
 		return 0, err
 	}

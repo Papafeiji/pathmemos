@@ -54,6 +54,10 @@ func (s *Storage) OSSConfigured() bool {
 }
 
 func (s *Storage) Save(reader io.Reader, ext string) (string, int64, error) {
+	// R2-L01：ext 只能是简单扩展名，拒绝路径分隔符与 .. 防目录穿越（调用方白名单之外的双保险）。
+	if strings.ContainsAny(ext, "/\\") || strings.Contains(ext, "..") {
+		return "", 0, fmt.Errorf("invalid extension")
+	}
 	now := time.Now()
 	subDir := now.Format("2006/01")
 	fileName, err := util.NewUUID()
@@ -141,6 +145,10 @@ func (s *Storage) SaveSystemWithName(reader io.Reader, ext, fileName string) (st
 
 // SaveWithName saves data to a file with a specific name under the current month directory.
 func (s *Storage) SaveWithName(reader io.Reader, ext, fileName string) (string, int64, error) {
+	// R2-L01：ext/fileName 校验防目录穿越（调用方白名单之外的双保险）。
+	if strings.ContainsAny(ext, "/\\") || strings.Contains(ext, "..") || strings.ContainsAny(fileName, "/\\") || strings.Contains(fileName, "..") {
+		return "", 0, fmt.Errorf("invalid extension or file name")
+	}
 	now := time.Now()
 	subDir := now.Format("2006/01")
 	relPath := subDir + "/" + fileName + ext
@@ -173,7 +181,7 @@ func (s *Storage) IsObjectExist(key, storageType string) (bool, error) {
 		return s.oss.IsObjectExist(key)
 	}
 	clean := filepath.Clean(strings.TrimPrefix(key, "/"))
-	if clean == "" || clean == "." || strings.Contains(clean, "..") {
+	if clean == "" || clean == "." || !filepath.IsLocal(clean) {
 		return false, fmt.Errorf("invalid path")
 	}
 	absPath, err := filepath.Abs(filepath.Join(s.baseDir, clean))
@@ -196,7 +204,7 @@ func (s *Storage) IsObjectExist(key, storageType string) (bool, error) {
 
 func (s *Storage) Delete(relPath string) error {
 	clean := filepath.Clean(strings.TrimPrefix(relPath, "/"))
-	if clean == "" || clean == "." || strings.Contains(clean, "..") {
+	if clean == "" || clean == "." || !filepath.IsLocal(clean) {
 		return fmt.Errorf("invalid path")
 	}
 	fullPath := filepath.Join(s.baseDir, clean)
@@ -233,6 +241,10 @@ func (s *Storage) URL(path, storageType string) (string, error) {
 			return "", fmt.Errorf("oss not configured")
 		}
 		return s.oss.URL(path), nil
+	}
+	// B5-14：baseURL 未配置时返回明确错误，避免静默产生相对路径 URL。
+	if strings.TrimSpace(s.baseURL) == "" {
+		return "", fmt.Errorf("storage base url not configured")
 	}
 	// 按 "/" 分段分别转义再拼接：整段 PathEscape 会把路径分隔符转成 %2F。
 	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")

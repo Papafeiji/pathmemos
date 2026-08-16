@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,8 +54,16 @@ type Config struct {
 	WechatVirtualAppKeySandbox string
 	WechatMsgToken             string
 	WechatEncodingAESKey       string
-	TencentMapKeys             []string
-	AIAPIKey                   string
+
+	// WechatVirtualCallbackToken 微信虚拟支付发货回调的验签 Token（安全模式），
+	// 与公众号消息 Token 相互独立，避免两类回调配置冲突。
+	WechatVirtualCallbackToken string
+	// WechatVirtualCallbackAESKey 虚拟支付回调安全模式的 EncodingAESKey（43 位）。
+	WechatVirtualCallbackAESKey string
+	// PaymentAllowSandbox 是否允许客户端指定 env=1 走沙箱虚拟支付（仅联调服务器开启，生产默认关闭）。
+	PaymentAllowSandbox bool
+	TencentMapKeys      []string
+	AIAPIKey            string
 
 	OSSAccessKeyID     string
 	OSSAccessKeySecret string
@@ -91,12 +100,21 @@ type Config struct {
 	// 可选：未配置时回退为源站地址（APIHost）。
 	MCPPublicURL string
 
+	// MCPEnabled 是否对外开启 MCP 功能（/system/config features.mcp，B6a-15）。
+	// 默认开启，可用 MCP_ENABLED=0 显式关闭。
+	MCPEnabled bool
+
 	// OpenAPIKey 是开源版与 Cloudflare Worker 之间的共享密钥。
 	// Worker 转发请求时通过 X-Private-Api-Key 头部携带，开源版据此识别合法请求。
 	OpenAPIKey string
 
 	// StorageLocalPath 是开源版本地文件存储根目录。
 	StorageLocalPath string
+
+	// UserImageStorageLimitBytes 普通用户图片存储上限（字节），0 表示不限制。
+	UserImageStorageLimitBytes int64
+	// UserImageStorageLimitBytesVIP VIP 用户图片存储上限（字节），0 表示不限制。
+	UserImageStorageLimitBytesVIP int64
 
 	JobIntervalAutoRecord            time.Duration
 	JobIntervalAbnormalAlert         time.Duration
@@ -137,31 +155,41 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	userImageStorageLimitBytes, err := defaultInt64Env("USER_IMAGE_STORAGE_LIMIT_BYTES", 1024*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	userImageStorageLimitBytesVIP, err := defaultInt64Env("USER_IMAGE_STORAGE_LIMIT_BYTES_VIP", 5*1024*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+
+	// 成对回退（CF001a）：微信 AppID/Secret 仅当两者同时为空时才双双回退到 wechatsecrets 内置值，
+	// 避免半配置（只设其一）时产生 AppID 来自环境、Secret 来自内置的混合配对。
 	wechatAppID := os.Getenv("WECHAT_APPID")
 	wechatSecret := os.Getenv("WECHAT_SECRET")
-	deploymentMode := defaultEnv("DEPLOYMENT_MODE", "saas")
-	if deploymentMode == "open" {
-		// 要么全部使用环境变量，要么全部使用内置默认值，避免 AppID/Secret 不匹配。
-		if wechatAppID == "" && wechatSecret == "" {
-			wechatAppID = wechatsecrets.DefaultAppID()
-			wechatSecret = wechatsecrets.DefaultSecret()
-		}
+	if wechatAppID == "" && wechatSecret == "" {
+		wechatAppID = wechatsecrets.DefaultAppID()
+		wechatSecret = wechatsecrets.DefaultSecret()
 	}
 
 	cfg := &Config{
-		DatabaseURL:                os.Getenv("DATABASE_URL"),
-		RedisAddr:                  os.Getenv("REDIS_ADDR"),
-		WechatAppID:                wechatAppID,
-		WechatSecret:               wechatSecret,
-		WechatMPAppID:              os.Getenv("WECHAT_MP_APPID"),
-		WechatMPSecret:             os.Getenv("WECHAT_MP_SECRET"),
-		WechatMPGhID:               os.Getenv("WECHAT_MP_GHID"),
-		WechatMiniLinkEnvVersion:   defaultEnv("WECHAT_MINI_LINK_ENV_VERSION", "release"),
-		WechatVirtualOfferID:       os.Getenv("WECHAT_VIRTUAL_OFFER_ID"),
-		WechatVirtualAppKeyProd:    os.Getenv("WECHAT_VIRTUAL_APP_KEY_PRODUCTION"),
-		WechatVirtualAppKeySandbox: os.Getenv("WECHAT_VIRTUAL_APP_KEY_SANDBOX"),
-		WechatMsgToken:             os.Getenv("WECHAT_MSG_TOKEN"),
-		WechatEncodingAESKey:       os.Getenv("WECHAT_ENCODING_AES_KEY"),
+		DatabaseURL:                 os.Getenv("DATABASE_URL"),
+		RedisAddr:                   os.Getenv("REDIS_ADDR"),
+		WechatAppID:                 wechatAppID,
+		WechatSecret:                wechatSecret,
+		WechatMPAppID:               os.Getenv("WECHAT_MP_APPID"),
+		WechatMPSecret:              os.Getenv("WECHAT_MP_SECRET"),
+		WechatMPGhID:                os.Getenv("WECHAT_MP_GHID"),
+		WechatMiniLinkEnvVersion:    defaultEnv("WECHAT_MINI_LINK_ENV_VERSION", "release"),
+		WechatVirtualOfferID:        os.Getenv("WECHAT_VIRTUAL_OFFER_ID"),
+		WechatVirtualAppKeyProd:     os.Getenv("WECHAT_VIRTUAL_APP_KEY_PRODUCTION"),
+		WechatVirtualAppKeySandbox:  os.Getenv("WECHAT_VIRTUAL_APP_KEY_SANDBOX"),
+		WechatMsgToken:              os.Getenv("WECHAT_MSG_TOKEN"),
+		WechatEncodingAESKey:        os.Getenv("WECHAT_ENCODING_AES_KEY"),
+		WechatVirtualCallbackToken:  os.Getenv("WECHAT_VIRTUAL_CALLBACK_TOKEN"),
+		WechatVirtualCallbackAESKey: os.Getenv("WECHAT_VIRTUAL_CALLBACK_AES_KEY"),
+		PaymentAllowSandbox:         os.Getenv("PAYMENT_ALLOW_SANDBOX") == "1",
 
 		TencentMapKeys: parseKeys(os.Getenv("TENCENT_MAP_KEY")),
 		AIAPIKey:       os.Getenv("AI_API_KEY"),
@@ -178,15 +206,19 @@ func Load() (*Config, error) {
 		SSEPort:          defaultEnv("SSE_PORT", "8081"),
 		APIHost:          os.Getenv("API_HOST"),
 		LogLevel:         defaultEnv("LOG_LEVEL", "INFO"),
-		DeploymentMode:   deploymentMode,
+		DeploymentMode:   defaultEnv("DEPLOYMENT_MODE", "saas"),
 		AIBaseURL:        defaultEnv("AI_BASE_URL", ""),
 		AIModel:          defaultEnv("AI_MODEL", ""),
 		TrustedProxyCIDR: os.Getenv("TRUSTED_PROXY_CIDR"),
 		WorkerSecret:     os.Getenv("WORKER_SECRET"),
 		MCPWorkerSecret:  os.Getenv("MCP_WORKER_SECRET"),
 		MCPPublicURL:     os.Getenv("MCP_PUBLIC_URL"),
+		MCPEnabled:       boolEnv("MCP_ENABLED", true),
 		OpenAPIKey:       os.Getenv("OPEN_API_KEY"),
 		StorageLocalPath: defaultEnv("STORAGE_LOCAL_PATH", "/opt/pathmemos/uploads"),
+
+		UserImageStorageLimitBytes:    userImageStorageLimitBytes,
+		UserImageStorageLimitBytesVIP: userImageStorageLimitBytesVIP,
 
 		JobIntervalAutoRecord:            jobIntervalAutoRecord,
 		JobIntervalAbnormalAlert:         jobIntervalAbnormalAlert,
@@ -202,6 +234,21 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func defaultInt64Env(key string, defaultValue int64) (int64, error) {
+	s := os.Getenv(key)
+	if s == "" {
+		return defaultValue, nil
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
+	}
+	if v < 0 {
+		return 0, fmt.Errorf("%s must be non-negative", key)
+	}
+	return v, nil
 }
 
 func parseKeys(s string) []string {
@@ -267,6 +314,21 @@ func (c *Config) validate() error {
 		if c.WechatMsgToken == "" {
 			return fmt.Errorf("WECHAT_MSG_TOKEN is required")
 		}
+		// 虚拟支付发货回调已切换安全模式（fail-closed 验签 + 加密），两个密钥缺一不可。
+		if c.WechatVirtualCallbackToken == "" {
+			return fmt.Errorf("WECHAT_VIRTUAL_CALLBACK_TOKEN is required (虚拟支付回调验签 Token)")
+		}
+		if c.WechatVirtualCallbackAESKey == "" {
+			return fmt.Errorf("WECHAT_VIRTUAL_CALLBACK_AES_KEY is required (虚拟支付回调加密密钥)")
+		}
+		// SaaS 模式禁止静默回退内置微信凭据（B1-03）：必须显式配置 WECHAT_APPID/WECHAT_SECRET。
+		// 开源版仍可使用 wechatsecrets 内置凭据，机制保留。
+		if os.Getenv("WECHAT_APPID") == "" {
+			return fmt.Errorf("WECHAT_APPID is required in saas mode (内置凭据仅限开源版)")
+		}
+		if os.Getenv("WECHAT_SECRET") == "" {
+			return fmt.Errorf("WECHAT_SECRET is required in saas mode (内置凭据仅限开源版)")
+		}
 	}
 	if c.TrustedProxyCIDR != "" {
 		for _, cidr := range strings.Split(c.TrustedProxyCIDR, ",") {
@@ -304,6 +366,20 @@ func defaultEnv(key, def string) string {
 		return def
 	}
 	return v
+}
+
+// boolEnv 解析布尔环境变量：接受 strconv.ParseBool 支持的全部形式（1/t/true/yes/on…），
+// 空值回退默认值，非法值回退 "1" 语义（兼容历史配置）。
+func boolEnv(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return v == "1"
+	}
+	return b
 }
 
 func defaultDurationEnv(key string, def time.Duration) (time.Duration, error) {

@@ -49,6 +49,7 @@ type Runner struct {
 	cfg         *config.Config
 	wg          sync.WaitGroup
 	cancel      context.CancelFunc
+	tickersMu   sync.Mutex
 	tickers     []*time.Ticker
 }
 
@@ -90,9 +91,12 @@ func (r *Runner) Stop() {
 	if r.cancel != nil {
 		r.cancel()
 	}
+	r.tickersMu.Lock()
 	for _, t := range r.tickers {
 		t.Stop()
 	}
+	r.tickers = nil
+	r.tickersMu.Unlock()
 	done := make(chan struct{})
 	safe.Go(context.Background(), nil, func() {
 		r.wg.Wait()
@@ -109,7 +113,9 @@ func (r *Runner) Stop() {
 
 func (r *Runner) schedule(ctx context.Context, interval, maxDuration time.Duration, lockKey string, fn func(context.Context) error) {
 	ticker := time.NewTicker(interval)
+	r.tickersMu.Lock()
 	r.tickers = append(r.tickers, ticker)
+	r.tickersMu.Unlock()
 
 	r.wg.Add(1)
 	safe.GoWithRecover(ctx, nil, func() error {
@@ -142,8 +148,9 @@ func (r *Runner) schedule(ctx context.Context, interval, maxDuration time.Durati
 
 // scheduleDailyAt 在每天指定时刻触发任务，首次会等待到下一个触发点。
 func (r *Runner) scheduleDailyAt(ctx context.Context, hour, min int, maxDuration time.Duration, lockKey string, fn func(context.Context) error) {
-	now := time.Now()
-	next := time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, now.Location())
+	// 按上海时区计算触发点：容器时区常为 UTC，直接 now.Location() 会偏移 8 小时。
+	now := timeutil.NowShanghai()
+	next := time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, timeutil.Shanghai)
 	if !next.After(now) {
 		next = next.Add(24 * time.Hour)
 	}
@@ -159,7 +166,9 @@ func (r *Runner) scheduleDailyAt(ctx context.Context, hour, min int, maxDuration
 		}
 
 		ticker := time.NewTicker(24 * time.Hour)
+		r.tickersMu.Lock()
 		r.tickers = append(r.tickers, ticker)
+		r.tickersMu.Unlock()
 		for {
 			select {
 			case <-ctx.Done():
@@ -204,7 +213,9 @@ func (r *Runner) runTask(ctx context.Context, lockKey string, maxDuration time.D
 		defer r.lock.Unlock(context.WithoutCancel(ctx), lockKey, token)
 
 		// 任务执行可能接近或超过 maxDuration，启动续期防止锁提前释放导致多实例并发。
-		extendCtx, stopExtend := context.WithCancel(ctx)
+		// 续期带总时长上限（maxDuration + 2×TTL 缓冲）：任务卡死且不响应取消时，
+		// 续期到期停止、锁自然过期，其他实例可接管，避免永久持锁。
+		extendCtx, stopExtend := context.WithTimeout(ctx, maxDuration+2*backgroundJobLockTTL)
 		defer stopExtend()
 		extendFailed := make(chan struct{}, 1)
 		safe.GoWithRecover(extendCtx, nil, func() error {
@@ -252,8 +263,13 @@ func (r *Runner) runTask(ctx context.Context, lockKey string, maxDuration time.D
 		case <-extendFailed:
 
 			cancelWorker()
-			// 等待任务 goroutine 退出，防止其继续占用 DB 连接等资源。
-			<-done
+			// 有界等待任务 goroutine 退出（最长 30s）：任务不响应取消时不再无限阻塞，
+			// 剩余资源随 workerCtx 超时自然释放；锁由上面的续期上限保证到期。
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+				slog.Error("background job worker did not exit after lock extend failure", slog.String("lock_key", lockKey))
+			}
 			return
 		case err := <-done:
 			elapsed := time.Since(start)
@@ -288,7 +304,8 @@ func (r *Runner) runAutoRecord(ctx context.Context) error {
 }
 
 const (
-	commonAddressSummaryWorkers = 5
+	commonAddressSummaryWorkers   = 5
+	commonAddressSummaryBatchSize = 1000
 )
 
 func (r *Runner) runCommonAddressSummary(ctx context.Context) error {
@@ -298,23 +315,8 @@ func (r *Runner) runCommonAddressSummary(ctx context.Context) error {
 	start := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, timeutil.Shanghai)
 	end := start.Add(24 * time.Hour)
 
-	userIDs, err := r.pool.Queries().ListUsersWithDiaryChangesSince(ctx, sqlc.ListUsersWithDiaryChangesSinceParams{
-		UpdatedAt:   pgtype.Timestamptz{Time: start.UTC(), Valid: true},
-		UpdatedAt_2: pgtype.Timestamptz{Time: end.UTC(), Valid: true},
-	})
-	if err != nil {
-		return fmt.Errorf("list users with diary changes: %w", err)
-	}
-	if len(userIDs) == 0 {
-		return nil
-	}
-
-	jobs := make(chan string, len(userIDs))
-	for _, userID := range userIDs {
-		jobs <- userID
-	}
-	close(jobs)
-
+	// 固定工作池 + 游标分批投递，避免一次性物化昨日全部变更用户 ID。
+	jobs := make(chan string, commonAddressSummaryBatchSize)
 	var wg sync.WaitGroup
 	var failed atomic.Int32
 	for i := 0; i < commonAddressSummaryWorkers; i++ {
@@ -331,6 +333,32 @@ func (r *Runner) runCommonAddressSummary(ctx context.Context) error {
 			}
 		})
 	}
+
+	cursor := ""
+	for {
+		userIDs, err := r.pool.Queries().ListUsersWithDiaryChangesSince(ctx, sqlc.ListUsersWithDiaryChangesSinceParams{
+			UpdatedAt:  pgtype.Timestamptz{Time: start.UTC(), Valid: true},
+			UpdatedAt2: pgtype.Timestamptz{Time: end.UTC(), Valid: true},
+			Cursor:     cursor,
+			Limit:      commonAddressSummaryBatchSize,
+		})
+		if err != nil {
+			close(jobs)
+			wg.Wait()
+			return fmt.Errorf("list users with diary changes: %w", err)
+		}
+		if len(userIDs) == 0 {
+			break
+		}
+		for _, userID := range userIDs {
+			jobs <- userID
+		}
+		cursor = userIDs[len(userIDs)-1]
+		if len(userIDs) < commonAddressSummaryBatchSize {
+			break
+		}
+	}
+	close(jobs)
 	wg.Wait()
 
 	if failed.Load() > 0 {
@@ -355,6 +383,10 @@ func (r *Runner) runAbnormalAlertCheck(ctx context.Context) error {
 		return nil
 	}
 
+	// seen 记录本轮已尝试过的用户：候选过滤依赖 SendAbnormalAlert 成功后推进
+	// abnormal_alert_sent_at；发送持续失败的用户会反复出现在候选里。
+	// 当整批都是已尝试过的用户时视为无进展，退出本轮，剩余交给下一周期。
+	seen := make(map[string]struct{})
 	for {
 		users, err := r.bgPool.Queries().ListAbnormalAlertCandidates(ctx, sqlc.ListAbnormalAlertCandidatesParams{
 			Column1: pgtype.Timestamptz{Time: cutoff, Valid: true},
@@ -367,14 +399,27 @@ func (r *Runner) runAbnormalAlertCheck(ctx context.Context) error {
 			return nil
 		}
 
-		var wg sync.WaitGroup
+		var batch []string
 		for _, u := range users {
+			if _, ok := seen[u.ID]; !ok {
+				batch = append(batch, u.ID)
+				seen[u.ID] = struct{}{}
+			}
+		}
+		if len(batch) == 0 {
+			slog.WarnContext(ctx, "abnormal alert batch has no progress, deferring rest to next cycle",
+				slog.Int("candidates", len(users)))
+			return nil
+		}
+
+		var wg sync.WaitGroup
+		for _, id := range batch {
 			wg.Add(1)
 			safe.Go(ctx, nil, func() {
 				defer wg.Done()
-				if sendErr := r.pushService.SendAbnormalAlert(ctx, u.ID); sendErr != nil {
+				if sendErr := r.pushService.SendAbnormalAlert(ctx, id); sendErr != nil {
 					slog.ErrorContext(ctx, "send abnormal alert failed",
-						slog.String("user_id", u.ID), slog.Any("error", sendErr))
+						slog.String("user_id", id), slog.Any("error", sendErr))
 				}
 			})
 		}
@@ -432,6 +477,11 @@ func (r *Runner) runOrderClose(ctx context.Context) error {
 const cleanupBatchSize = 1000
 
 func (r *Runner) runCleanupAILogs(ctx context.Context) error {
+	// B5-18：本周期内已失败的用户集合，分页边界重复出现时不再重试。
+	// 跨周期跳过不做——失败多为瞬时故障，跨周期跳过会永久放弃清理；
+	// 持续失败用户每轮仅重查一次（低频后台任务，可接受）。
+	failedUsers := make(map[string]struct{})
+
 	for {
 		n, err := r.bgPool.Queries().DeleteOldDialogLogs(ctx, cleanupBatchSize)
 		if err != nil {
@@ -453,7 +503,12 @@ func (r *Runner) runCleanupAILogs(ctx context.Context) error {
 		if len(users) == 0 {
 			break
 		}
+		processed := 0
 		for _, userID := range users {
+			if _, failed := failedUsers[userID]; failed {
+				continue
+			}
+			processed++
 			for {
 				n, err := r.bgPool.Queries().DeleteExcessDialogLogs(ctx, sqlc.DeleteExcessDialogLogsParams{
 					UserID:      userID,
@@ -462,12 +517,17 @@ func (r *Runner) runCleanupAILogs(ctx context.Context) error {
 				})
 				if err != nil {
 					slog.ErrorContext(ctx, "delete excess dialog logs failed", slog.String("user_id", userID), slog.Any("error", err))
+					failedUsers[userID] = struct{}{}
 					break
 				}
 				if n < cleanupBatchSize {
 					break
 				}
 			}
+		}
+		// 本页无任何新进展（全部为持续失败用户）时退出，避免死循环到 ctx 超时。
+		if processed == 0 {
+			break
 		}
 		if len(users) < int(cleanupBatchSize) {
 			break
@@ -520,6 +580,20 @@ func (r *Runner) runCleanupOrphanFiles(ctx context.Context) error {
 				slog.ErrorContext(ctx, "delete orphan file record failed", slog.String("file_id", f.ID), slog.Any("error", err))
 				lastID = f.ID
 				continue
+			}
+			// 孤儿图片删除后回退用户图片配额（上传时已 IncrementUserImageStorage 计费），
+			// 否则配额被幽灵字节永久占用，最终 checkStorageLimit 拒绝后续上传。
+			if fileRecord.FileType == "image" && fileRecord.CreatedBy.Valid && fileRecord.CreatedBy.String != "" {
+				if decErr := r.bgPool.Queries().DecrementUserImageStorage(ctx, sqlc.DecrementUserImageStorageParams{
+					ID:                fileRecord.CreatedBy.String,
+					ImageStorageBytes: fileRecord.SizeBytes,
+				}); decErr != nil {
+					slog.ErrorContext(ctx, "decrement user image storage failed for orphan file",
+						slog.String("file_id", f.ID),
+						slog.String("user_id", fileRecord.CreatedBy.String),
+						slog.Int64("size", fileRecord.SizeBytes),
+						slog.Any("error", decErr))
+				}
 			}
 			lastID = f.ID
 		}

@@ -83,9 +83,25 @@
     margin-bottom: 16rpx;
 
     .card-title {
+      display: flex;
+      align-items: center;
       font-size: 30rpx;
       font-weight: 600;
       color: var(--ppfj-text);
+
+      .step-badge {
+        width: 36rpx;
+        height: 36rpx;
+        line-height: 36rpx;
+        border-radius: 50%;
+        background: #07c160;
+        color: #fff;
+        font-size: 24rpx;
+        font-weight: 600;
+        text-align: center;
+        margin-right: 12rpx;
+        flex-shrink: 0;
+      }
     }
 
     .refresh-icon {
@@ -116,10 +132,33 @@
     background: var(--ppfj-input-bg);
     border-radius: 12rpx;
     padding: 20rpx 24rpx;
-    margin-bottom: 32rpx;
     font-size: 28rpx;
     color: var(--ppfj-text);
     word-break: break-all;
+
+    &:active {
+      opacity: 0.7;
+    }
+
+    .key-text {
+      flex: 1;
+      min-height: 40rpx;
+    }
+
+    .copy-chip {
+      flex-shrink: 0;
+      margin-left: 16rpx;
+      font-size: 24rpx;
+      line-height: 1;
+      color: #07c160;
+      border: 1rpx solid #07c160;
+      border-radius: 8rpx;
+      padding: 10rpx 20rpx;
+    }
+  }
+
+  .key-tip {
+    margin-top: 16rpx;
   }
 
   .tab-bar {
@@ -132,7 +171,7 @@
     .tab-item {
       flex: 1;
       text-align: center;
-      font-size: 28rpx;
+      font-size: 26rpx;
       color: var(--ppfj-text-secondary);
       padding: 16rpx 0;
       border-radius: 10rpx;
@@ -155,11 +194,32 @@
     margin-bottom: 8rpx;
   }
 
+  .tab-desc {
+    font-size: 26rpx;
+    color: var(--ppfj-text-secondary);
+    line-height: 1.6;
+    margin-bottom: 20rpx;
+  }
+
+  .step-list {
+    margin-bottom: 20rpx;
+
+    .step-item {
+      font-size: 26rpx;
+      color: var(--ppfj-text-secondary);
+      line-height: 1.8;
+    }
+  }
+
   .section-title {
     font-size: 28rpx;
     font-weight: 600;
     color: var(--ppfj-text);
     margin-bottom: 16rpx;
+  }
+
+  .http-section-gap {
+    margin-top: 32rpx;
   }
 
   .tip-code {
@@ -181,10 +241,6 @@
     margin-bottom: 16rpx;
   }
 
-  .mcp-section {
-    margin-top: 48rpx;
-  }
-
   .copy-config-btn {
     display: inline-block;
     background: #07c160;
@@ -192,7 +248,6 @@
     font-size: 28rpx;
     padding: 16rpx 40rpx;
     border-radius: 12rpx;
-    margin-bottom: 24rpx;
 
     &:active {
       opacity: 0.8;

@@ -82,8 +82,12 @@ func (s *Service) HasVIPClaim(ctx context.Context, userID, vipID string) (bool, 
 }
 
 func (s *Service) ExtendVIPDays(ctx context.Context, userID string, days int) error {
-	if userID == "" || days <= 0 {
-		return nil
+	// B6b-08：非法参数显式报错，不再静默成功。
+	if userID == "" {
+		return fmt.Errorf("empty user id")
+	}
+	if days <= 0 {
+		return fmt.Errorf("days must be positive, got %d", days)
 	}
 
 	return db.WithTx(ctx, s.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
@@ -92,8 +96,11 @@ func (s *Service) ExtendVIPDays(ctx context.Context, userID string, days int) er
 }
 
 func (s *Service) ExtendVIPDaysWithTx(ctx context.Context, userID string, days int, q *sqlc.Queries) error {
-	if userID == "" || days <= 0 {
-		return nil
+	if userID == "" {
+		return fmt.Errorf("empty user id")
+	}
+	if days <= 0 {
+		return fmt.Errorf("days must be positive, got %d", days)
 	}
 
 	now := timeutil.NowShanghai()
@@ -163,15 +170,6 @@ func (s *Service) activateVIPWithTx(ctx context.Context, userID string, vipRecor
 	}
 
 	now := timeutil.NowShanghai()
-	var expire time.Time
-	switch unit {
-	case "day":
-		expire = now.AddDate(0, 0, duration)
-	case "month":
-		expire = now.AddDate(0, duration, 0)
-	case "year":
-		expire = now.AddDate(duration, 0, 0)
-	}
 
 	claimID, err := util.NewUUID()
 	if err != nil {
@@ -210,7 +208,7 @@ func (s *Service) activateVIPWithTx(ctx context.Context, userID string, vipRecor
 		case "year":
 			added = base.AddDate(duration, 0, 0)
 		}
-		expire = added
+		expire := added
 
 		_, err = q.UpsertUserVIP(ctx, sqlc.UpsertUserVIPParams{
 			ID:         existing.ID,
@@ -222,15 +220,42 @@ func (s *Service) activateVIPWithTx(ctx context.Context, userID string, vipRecor
 			return fmt.Errorf("upsert user vip (extend): %w", err)
 		}
 	} else if errors.Is(err, pgx.ErrNoRows) {
+		// 并发首次激活竞态：先 ON CONFLICT DO NOTHING 占位行，再 FOR UPDATE 重读串行化创建，
+		// 使后提交者从先提交者的 expire_time 叠加时长，避免 GREATEST 只保留较大者、较小档丢失。
 		newUserVipID, err := util.NewUUID()
 		if err != nil {
 			return fmt.Errorf("generate user vip id: %w", err)
 		}
-		_, err = q.UpsertUserVIP(ctx, sqlc.UpsertUserVIPParams{
+		if err := q.ClaimUserVIPRow(ctx, sqlc.ClaimUserVIPRowParams{
 			ID:         newUserVipID,
 			UserID:     userID,
 			BeginTime:  pgtype.Timestamptz{Time: now, Valid: true},
-			ExpireTime: pgtype.Timestamptz{Time: expire, Valid: true},
+			ExpireTime: pgtype.Timestamptz{Time: now, Valid: true},
+		}); err != nil {
+			return fmt.Errorf("claim user vip row: %w", err)
+		}
+		claimed, err := q.GetUserVIPForUpdate(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("re-read user vip for update: %w", err)
+		}
+		base := now
+		if claimed.ExpireTime.Time.After(now) {
+			base = claimed.ExpireTime.Time
+		}
+		var extended time.Time
+		switch unit {
+		case "day":
+			extended = base.AddDate(0, 0, duration)
+		case "month":
+			extended = base.AddDate(0, duration, 0)
+		case "year":
+			extended = base.AddDate(duration, 0, 0)
+		}
+		_, err = q.UpsertUserVIP(ctx, sqlc.UpsertUserVIPParams{
+			ID:         claimed.ID,
+			UserID:     userID,
+			BeginTime:  claimed.BeginTime,
+			ExpireTime: pgtype.Timestamptz{Time: extended, Valid: true},
 		})
 		if err != nil {
 			return fmt.Errorf("upsert user vip (create): %w", err)

@@ -21,18 +21,19 @@ WHERE id IN (
 );
 
 -- name: ListPendingAutoRecordUsers :many
+-- B2-13：以聚合 JOIN 替代 EXISTS + 相关子查询计数，避免每行重复扫描轨迹表。
 SELECT u.id AS user_id
 FROM users u
 JOIN user_vips v ON v.user_id = u.id
+JOIN (
+    SELECT user_id, COUNT(*) AS cnt
+    FROM auto_record_trajectories
+    WHERE created_at > now() - interval '7 days' -- 覆盖 7 天清理窗口，避免 >3 天旧轨迹在清理前失去处理机会
+    GROUP BY user_id
+) t ON t.user_id = u.id
 WHERE u.auto_record_enabled = true
   AND v.expire_time > now() - interval '3 days'
-  AND EXISTS (
-    SELECT 1 FROM auto_record_trajectories t
-    WHERE t.user_id = u.id
-  )
-ORDER BY (
-  SELECT COUNT(*) FROM auto_record_trajectories t WHERE t.user_id = u.id
-) DESC
+ORDER BY t.cnt DESC
 LIMIT $1;
 
 -- name: ListAbnormalAlertCandidates :many

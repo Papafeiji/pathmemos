@@ -1,6 +1,6 @@
 
 import i18nBehavior from '../../behaviors/i18n';
-import { i18n } from '../../utils/i18n';
+import { formatTimeLabel } from '../../utils/util';
 
 Component({
   behaviors: [i18nBehavior],
@@ -96,8 +96,9 @@ Component({
       this.onClose();
     },
 
+    // R2-F18：仅用于拦截弹层冒泡关闭，无业务逻辑。
     onSheetTap() {
-
+      /* 拦截冒泡 */
     },
 
     onEditTime() {
@@ -159,8 +160,9 @@ Component({
       }
     },
 
+    // R2-F18：仅用于拦截弹层冒泡关闭，无业务逻辑。
     onEditSheetTap() {
-      
+      /* 拦截冒泡 */
     },
 
     formatTime(d: Date) {
@@ -175,23 +177,8 @@ Component({
     },
 
     formatDisplayLabel(h: number, m: number) {
-      if (h === 0) {
-        return `${i18n.t('timePicker.period.midnight')} 12:${String(m).padStart(2, '0')}`;
-      }
-      let periodKey = '';
-      if (h >= 1 && h <= 4) {
-        periodKey = 'timePicker.period.earlyMorning';
-      } else if (h >= 5 && h <= 8) {
-        periodKey = 'timePicker.period.morning';
-      } else if (h >= 9 && h <= 12) {
-        periodKey = 'timePicker.period.noon';
-      } else if (h >= 13 && h <= 18) {
-        periodKey = 'timePicker.period.afternoon';
-      } else {
-        periodKey = 'timePicker.period.evening';
-      }
-      const hour = h <= 12 ? h : h - 12;
-      return `${i18n.t(periodKey)} ${hour}:${String(m).padStart(2, '0')}`;
+      // 与 NoteEdit 共用统一的时段映射（9-11 上午、12 中午）。
+      return formatTimeLabel(h, m);
     },
   },
 });

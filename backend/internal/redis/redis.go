@@ -2,7 +2,9 @@
 package redis
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -46,6 +48,14 @@ func NewClient(addr string) (*redis.Client, error) {
 
 	rdb := redis.NewClient(opt)
 
-	// 不再在启动时强依赖 Ping；请求级失败仍按原则返回错误，不降级。
+	// B6a-08：启动时异步 Ping，失败仅告警不阻断启动；连接池与请求级重试自愈。
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			slog.Warn("redis startup ping failed", slog.Any("error", err))
+		}
+	}()
+
 	return rdb, nil
 }

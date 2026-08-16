@@ -105,9 +105,11 @@
 
 <ConfirmDialog
   visible="{{showQuotaDialog}}"
-  title="{{_i18n['aiDrawer.quotaTitle'] || ''}}"
+  title="{{_i18n['common.tip'] || ''}}"
   content="{{_i18n['aiDrawer.quotaContent'] || ''}}"
-  confirmText="{{_i18n['aiDrawer.confirm'] || ''}}"
+  cancelText="{{_i18n['common.cancel'] || ''}}"
+  confirmText="{{_i18n['vip.upgradeNow'] || ''}}"
+  bind:cancel="onQuotaDialogClose"
   bind:confirm="onQuotaDialogConfirm"
   bind:close="onQuotaDialogClose"
 />

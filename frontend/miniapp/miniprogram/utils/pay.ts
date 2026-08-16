@@ -78,6 +78,9 @@ export const doPay = async (
         } else if (res.errMsg?.includes('SIG_EMPTY')) {
           errMsg = i18n.t('error.paySigEmpty');
         }
+        // 统一 onPayFail 契约：订单创建与支付任一环节失败都回调 onPayFail（隐藏 loading 等），
+        // 具体错误信息仍通过 reject 抛出供调用方 toast（F1-06）。
+        onPayFail && onPayFail();
         reject(new Error(errMsg));
       },
     });

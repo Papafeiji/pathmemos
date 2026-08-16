@@ -5,26 +5,31 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"papafeiji/backend/internal/db"
 	"papafeiji/backend/internal/family"
 	"papafeiji/backend/internal/file"
-	"papafeiji/backend/internal/middleware"
 
 	"github.com/jackc/pgx/v5"
 )
+
+// SessionDeleter 抽象按用户删除全部 session 的能力（*middleware.SessionManager 为生产实现），
+// 便于调用方在测试中注入 mock。
+type SessionDeleter interface {
+	DeleteAll(ctx context.Context, userID string) error
+}
 
 // CleanupAfterAccountDeletion 执行账号 DB 删除后的公共清理：
 // 失效受影响用户的所有 session，并删除物理文件（用户文件、封面、头像 marker）。
 // 所有错误仅记录日志，不返回 error，避免在注销已提交后误导用户认为操作失败。
 // 调用方可视场景选择在 HTTP 响应返回前的同步调用，或 safe.Go 异步调用。
 // 若提供 bgPool，物理文件查表将优先使用 bgPool，避免占用主连接池。
+// sessions 以最小接口注入（*middleware.SessionManager 为生产实现），便于调用方测试。
 func CleanupAfterAccountDeletion(
 	ctx context.Context,
 	pool *db.Pool,
 	bgPool *db.Pool,
-	sessions *middleware.SessionManager,
+	sessions SessionDeleter,
 	storage *file.Storage,
 	cleanup *family.AccountCleanupInfo,
 	userID string,
@@ -63,7 +68,7 @@ func CleanupAfterAccountDeletion(
 		}
 	}
 
-	if cleanup.MarkerPath != "" && !strings.Contains(cleanup.MarkerPath, "default-marker") {
+	if cleanup.MarkerDeletable() {
 		if err := storage.DeleteFile(cleanup.MarkerPath, cleanup.MarkerStorage); err != nil {
 			slog.ErrorContext(ctx, "delete account avatar marker failed",
 				slog.String("user_id", userID),

@@ -72,9 +72,13 @@ Component({
   },
   lifetimes: {
     attached() {
-      const rect = wx.getMenuButtonBoundingClientRect();
+      // 多端应用/模拟器没有胶囊菜单，提供默认值避免崩溃。
+      let rect: WechatMiniprogram.ClientRect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 } as any;
+      if (typeof wx.getMenuButtonBoundingClientRect === 'function') {
+        try { rect = wx.getMenuButtonBoundingClientRect() || rect; } catch (_e) {}
+      }
       const info = getSystemInfo()
-      const safeAreaTop = Math.max(info.statusBarHeight, info.safeArea.top)
+      const safeAreaTop = Math.max(info.statusBarHeight, info.safeArea?.top || 0)
       const isAndroid = info.platform === 'android';
       const isDevtools = info.platform === 'devtools';
 
@@ -85,8 +89,11 @@ Component({
 
       (this as any)._safeSetData({
         ios: !isAndroid,
-        innerPaddingRight: `padding-right: ${info.windowWidth - rect.left}px;`,
-        leftWidth: `width: ${info.windowWidth - rect.left}px`,
+        // 无胶囊菜单环境（多端应用/模拟器）rect.left 为 0，windowWidth-0=整屏宽，
+        // 会把标题挤到不可见；只有存在真实胶囊时才设置 padding。
+        innerPaddingRight: rect.width > 0 && rect.left > 0
+          ? `padding-right: ${Math.max(0, info.windowWidth - rect.left)}px;`
+          : '',
         safeAreaTop:
           isDevtools || isAndroid
             ? `height: calc(var(--height) + ${safeAreaTop}px); padding-top: ${safeAreaTop}px;`
@@ -122,16 +129,19 @@ Component({
       const data = this.data;
       const pages = getCurrentPages();
       const fallbackUrl = data.fallbackUrl || '/pages/index/index';
-      
+
       if (pages.length <= 1) {
         wx.redirectTo({ url: fallbackUrl });
-      } else if (data.delta) {
+      } else if (data.delta > 0) {
         wx.navigateBack({
           delta: data.delta,
           fail: () => {
             wx.redirectTo({ url: fallbackUrl });
           },
         });
+      } else {
+        // delta <= 0（未配置/异常输入）：退化为跳转首页，避免点返回无反应。
+        wx.redirectTo({ url: fallbackUrl });
       }
       this.triggerEvent('back', { delta: data.delta }, {});
     },

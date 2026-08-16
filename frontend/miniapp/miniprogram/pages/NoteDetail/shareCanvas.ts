@@ -19,6 +19,8 @@ const COLORS = {
 const MAX_CANVAS_H = 8192;
 const MAX_TEXT_LEN = 3000;
 const MAX_RECORD_COUNT = 50;
+// R2-07：全局图片总量上限，防止极端记录×图片组合撑爆内存或超出 canvas 物理高度。
+const MAX_TOTAL_IMAGES = 150;
 
 export interface ShareRecordImage {
   filePath: string;
@@ -57,50 +59,34 @@ function rpxToPx(rpx: number, screenWidth: number): number {
   return (rpx * screenWidth) / 750;
 }
 
-function loadCanvasImage(canvas: any, url: string, tasks: any[], isAborted?: () => boolean): Promise<any> {
+// 网络图片直接交给 createImage 加载，走微信自带图片缓存（详情页已渲染过的图片不会重新下载）；
+// 不要改回 wx.downloadFile，它每次都会重新下载。
+function loadImage(canvas: any, src: string, isAborted?: () => boolean): Promise<any> {
   return new Promise((resolve) => {
-    if (!url) {
+    if (!src || isAborted?.()) {
       resolve(null);
       return;
     }
-    const task = wx.downloadFile({
-      url,
-      success: (res: any) => {
-        if (isAborted?.()) {
-          resolve(null);
-          return;
-        }
-        if (res.statusCode !== 200) {
-          resolve(null);
-          return;
-        }
-        const img = canvas.createImage();
-        img.onload = () => resolve(img);
-        img.onerror = () => resolve(null);
-        img.src = res.tempFilePath;
-      },
-      fail: () => resolve(null),
-    });
-    tasks.push(task);
-  });
-}
-
-function loadLocalImage(canvas: any, path: string, isAborted?: () => boolean): Promise<any> {
-  return new Promise((resolve) => {
-    if (isAborted?.()) {
-      resolve(null);
-      return;
-    }
+    let settled = false;
+    const done = (img: any) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(img);
+    };
+    // 网络图片挂起（既不 onload 也不 onerror，如连接黑洞）时兜底返回 null，
+    // 避免 generateShareImage 永久挂起、分享按钮 loading 与 _generatingShare 永不复位。
+    const timer = setTimeout(() => done(null), 8000);
     const img = canvas.createImage();
     img.onload = () => {
       if (isAborted?.()) {
-        resolve(null);
+        done(null);
         return;
       }
-      resolve(img);
+      done(img);
     };
-    img.onerror = () => resolve(null);
-    img.src = path;
+    img.onerror = () => done(null);
+    img.src = src;
   });
 }
 
@@ -171,6 +157,7 @@ function drawImageAspectFit(ctx: any, img: any, x: number, y: number, w: number,
 interface RecordLayout {
   height: number;
   addressH: number;
+  addressLines: string[];
   textLines: string[];
   textH: number;
   imageH: number;
@@ -204,8 +191,11 @@ function calcLayout(ctx: any, data: ShareData, innerWidth: number): Layout {
 
   const records: RecordLayout[] = data.filteredList.map((item) => {
     let addressH = 0;
+    // R2-F20：地址按可用宽度折行，超长地址不再画出卡片边界。
+    const addressLines: string[] = [];
     if (item.diaryAddress) {
-      addressH = rpxToPx(48, innerWidth);
+      addressLines.push(...wrapText(ctx, item.diaryAddress, mainW - rpxToPx(30, innerWidth), rpxToPx(26, innerWidth)));
+      addressH = addressLines.length * rpxToPx(48, innerWidth);
     }
 
     const textLines = wrapText(ctx, item.recordText || '', mainW, textSize);
@@ -221,7 +211,7 @@ function calcLayout(ctx: any, data: ShareData, innerWidth: number): Layout {
     }
 
     const bodyH = recordTopPadding + (addressH ? addressH + addrTextGap : 0) + textH + imageH;
-    return { height: bodyH, addressH, textLines, textH, imageH };
+    return { height: bodyH, addressH, addressLines, textLines, textH, imageH };
   });
 
   const recordsH = records.reduce((sum, r) => sum + r.height + recordGap, 0) - (records.length ? recordGap : 0);
@@ -244,18 +234,18 @@ async function asyncPool<T, R>(concurrency: number, items: T[], fn: (item: T) =>
   return results;
 }
 
-async function loadAllImages(canvas: any, data: ShareData, tasks: any[], isAborted?: () => boolean) {
-  const coverPromise = loadCanvasImage(canvas, data.baseInfo.coverImg || '', tasks, isAborted);
-  const emptyPromise = loadLocalImage(canvas, '/image/empty.png', isAborted);
-  const addressIconPromise = loadLocalImage(canvas, '/image/icon_address.png', isAborted);
-  const qrCodePromise = loadCanvasImage(canvas, data.qrCodeUrl || '', tasks, isAborted);
+async function loadAllImages(canvas: any, data: ShareData, isAborted?: () => boolean) {
+  const coverPromise = loadImage(canvas, data.baseInfo.coverImg || '', isAborted);
+  const emptyPromise = loadImage(canvas, '/image/empty.png', isAborted);
+  const addressIconPromise = loadImage(canvas, '/image/icon_address.png', isAborted);
+  const qrCodePromise = loadImage(canvas, data.qrCodeUrl || '', isAborted);
 
   const recordImageUrls: string[] = [];
   data.filteredList.forEach((item) => {
     (item.recordImages || []).forEach((img) => recordImageUrls.push(img.filePath));
   });
 
-  const recordImages = await asyncPool(10, recordImageUrls, (url) => loadCanvasImage(canvas, url, tasks, isAborted));
+  const recordImages = await asyncPool(10, recordImageUrls, (url) => loadImage(canvas, url, isAborted));
 
   const [cover, emptyIcon, addressIcon, qrCode] = await Promise.all([
     coverPromise, emptyPromise, addressIconPromise, qrCodePromise,
@@ -415,11 +405,14 @@ function drawRecords(ctx: any, data: ShareData, contentX: number, innerWidth: nu
       ctx.fillStyle = COLORS.textMain;
       ctx.font = `500 ${addrSize}px sans-serif`;
       ctx.textBaseline = 'top';
-      ctx.fillText(item.diaryAddress, addrX, mainY);
+      const addrLineH = rpxToPx(48, innerWidth);
+      (recLayout.addressLines || [item.diaryAddress]).forEach((line: string, li: number) => {
+        ctx.fillText(line, addrX, mainY + li * addrLineH);
+      });
 
       const showFamilyName = item.familyMemberUserId && item.familyMemberUserId !== data.currentUserId && !!item.familyMemberNickName;
       if (showFamilyName) {
-        const addrWidth = ctx.measureText(item.diaryAddress).width;
+        const addrWidth = ctx.measureText((recLayout.addressLines || [item.diaryAddress])[0] || '').width;
         ctx.fillStyle = COLORS.textLight;
         ctx.font = `400 ${familySize}px sans-serif`;
         ctx.fillText(item.familyMemberNickName || '', addrX + addrWidth + rpxToPx(12, innerWidth), mainY + (addrSize - familySize) / 2);
@@ -588,10 +581,18 @@ function draw(ctx: any, data: ShareData, layout: Layout, width: number, totalHei
   drawFooter(ctx, contentX, innerWidth, y, images.qrCode);
 }
 
-export function generateShareImage(page: any, data: ShareData, abortTasks: any[]): Promise<string> {
+export function generateShareImage(page: any, data: ShareData): Promise<string> {
+  // R2-07：按全局图片预算截断每条记录的图片（拷贝记录对象，避免影响页面数据）。
+  let imageBudget = MAX_TOTAL_IMAGES;
+  const filteredList = data.filteredList.slice(0, MAX_RECORD_COUNT).map((item) => {
+    if (imageBudget <= 0) return { ...item, recordImages: [] };
+    const images = (item.recordImages || []).slice(0, imageBudget);
+    imageBudget -= images.length;
+    return { ...item, recordImages: images };
+  });
   const limitedData: ShareData = {
     ...data,
-    filteredList: data.filteredList.slice(0, MAX_RECORD_COUNT),
+    filteredList,
   };
   return new Promise((resolve, reject) => {
     const query = wx.createSelectorQuery().in(page);
@@ -630,7 +631,7 @@ export function generateShareImage(page: any, data: ShareData, abortTasks: any[]
         ctx.scale(pixelRatio, pixelRatio);
 
         const isAborted = () => page._isDestroyed || page._isHidden;
-        const images = await loadAllImages(canvas, limitedData, abortTasks, isAborted);
+        const images = await loadAllImages(canvas, limitedData, isAborted);
         if (page._isDestroyed || page._isHidden) {
           reject(new Error('page hidden or destroyed'));
           return;

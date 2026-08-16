@@ -18,8 +18,11 @@ services:
       - WECHAT_VIRTUAL_APP_KEY_SANDBOX=${WECHAT_VIRTUAL_APP_KEY_SANDBOX:-}
       - WECHAT_MSG_TOKEN=${WECHAT_MSG_TOKEN:-}
       - WECHAT_ENCODING_AES_KEY=${WECHAT_ENCODING_AES_KEY:-}
+      - WECHAT_VIRTUAL_CALLBACK_TOKEN=${WECHAT_VIRTUAL_CALLBACK_TOKEN:-}
+      - WECHAT_VIRTUAL_CALLBACK_AES_KEY=${WECHAT_VIRTUAL_CALLBACK_AES_KEY:-}
       - TENCENT_MAP_KEY=${TENCENT_MAP_KEY}
       - AI_API_KEY=${AI_API_KEY:-}
+      - AI_PROVIDER=${AI_PROVIDER:-deepseek}
       - AI_BASE_URL=${AI_BASE_URL:-https://api.deepseek.com}
       - AI_MODEL=${AI_MODEL:-deepseek-chat}
       - API_HOST=${API_HOST:-http://localhost:8080}
@@ -75,6 +78,10 @@ services:
       POSTGRES_DB: papafeiji
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # 注意：不要挂载 backend/initdb 到 /docker-entrypoint-initdb.d——
+      # 全新部署时它会在 app 启动迁移之前先执行全部 *.up.sql 且不写 schema_migrations，
+      # app 的 Go 迁移器随后重复执行不可幂等迁移，导致 relation already exists 崩溃循环。
+      # schema 初始化统一由 app 容器启动时的 Go 迁移执行（backend/internal/migration）。
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
@@ -101,7 +108,7 @@ services:
   backup:
     image: alpine:3.21
     entrypoint: |
-      /bin/sh -c '
+      /bin/sh -c 'set -euo pipefail
         apk add --no-cache postgresql15-client >/dev/null
         while true; do
           KEEP=${BACKUP_KEEP:-7}

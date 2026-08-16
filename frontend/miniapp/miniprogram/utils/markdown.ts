@@ -21,17 +21,19 @@ function _markdownToHtml(md: string): string {
   let html = md;
 
   
+  // R2-F03：占位符加随机后缀，防止用户文本/AI 输出碰撞导致内容错乱。
+  const placeholderSuffix = Math.random().toString(36).slice(2, 8);
   const codeBlocks: string[] = [];
   html = html.replace(/```([\s\S]*?)```/g, (_, code) => {
     codeBlocks.push(code);
-    return `\0CODE_BLOCK_${codeBlocks.length - 1}\0`;
+    return `\0CB_${codeBlocks.length - 1}_${placeholderSuffix}\0`;
   });
 
   
   const inlineCodes: string[] = [];
   html = html.replace(/`([^`]+)`/g, (_, code) => {
     inlineCodes.push(code);
-    return `\0INLINE_CODE_${inlineCodes.length - 1}\0`;
+    return `\0IC_${inlineCodes.length - 1}_${placeholderSuffix}\0`;
   });
 
   
@@ -44,13 +46,13 @@ function _markdownToHtml(md: string): string {
   html = html.replace(/\n/g, '<br>');
 
   
-  html = html.replace(/\0CODE_BLOCK_(\d+)\0/g, (_, idx) => {
+  html = html.replace(new RegExp(`\\0CB_(\\d+)_${placeholderSuffix}\\0`, 'g'), (_, idx) => {
     const code = escapeHtml(codeBlocks[Number(idx)]);
     return `<pre style="background:#f6f8fa;padding:10px;border-radius:6px;overflow-x:auto;font-family:monospace;font-size:13px;line-height:1.4;">${code}</pre>`;
   });
 
   
-  html = html.replace(/\0INLINE_CODE_(\d+)\0/g, (_, idx) => {
+  html = html.replace(new RegExp(`\\0IC_(\\d+)_${placeholderSuffix}\\0`, 'g'), (_, idx) => {
     const code = escapeHtml(inlineCodes[Number(idx)]);
     return `<code style="background:#f1f3f4;padding:2px 5px;border-radius:3px;font-family:monospace;font-size:13px;">${code}</code>`;
   });

@@ -37,11 +37,14 @@
     "localPlugins": false,
     "disableUseStrict": false,
     "swc": false,
-    "disableSWC": true
+    "disableSWC": true,
+    "lessSetting": {
+      "commonUseFilePath": "app.less"
+    }
   },
   "simulatorType": "wechat",
   "simulatorPluginLibVersion": {
-    "wxext14566970e7e9f62": "3.6.5-23"
+    "wxext14566970e7e9f62": "3.6.5-41"
   },
   "condition": {},
   "srcMiniprogramRoot": "miniprogram/",
@@ -49,7 +52,7 @@
     "tabIndent": "insertSpaces",
     "tabSize": 2
   },
-  "appid": "wxYOUR_APPID_HERE",
+  "appid": "wxe56d190a14826b0d",
   "libVersion": "3.8.3",
   "packOptions": {
     "ignore": [],
@@ -60,5 +63,5 @@
       }
     ]
   },
-  "projectArchitecture": "miniprogram"
+  "projectArchitecture": "multiPlatform"
 }

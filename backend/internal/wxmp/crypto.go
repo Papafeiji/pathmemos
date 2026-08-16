@@ -7,31 +7,16 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha1"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 	"time"
 )
-
-// CheckSignature verifies WeChat server signature.
-func CheckSignature(token, signature, timestamp, nonce string) bool {
-	if signature == "" || timestamp == "" || nonce == "" || token == "" {
-		return false
-	}
-	arr := []string{token, timestamp, nonce}
-	sort.Strings(arr)
-	h := sha1.New()
-	_, _ = h.Write([]byte(strings.Join(arr, "")))
-	expected := hex.EncodeToString(h.Sum(nil))
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) == 1
-}
 
 // ReplyTextXML builds a passive text reply XML.
 func ReplyTextXML(toUser, fromUser, content string) string {
@@ -65,27 +50,6 @@ func ParseMessageXML(xmlBody string) (MessageXML, error) {
 	return msg, nil
 }
 
-// ExtractXMLTag extracts CDATA or plain tag content from XML string.
-// Deprecated: use ParseMessageXML for new code.
-func ExtractXMLTag(xml, tag string) string {
-	start := fmt.Sprintf("<%s><![CDATA[", tag)
-	end := fmt.Sprintf("]]></%s>", tag)
-	s := strings.Index(xml, start)
-	e := strings.Index(xml, end)
-	if s != -1 && e != -1 {
-		return xml[s+len(start) : e]
-	}
-
-	start = fmt.Sprintf("<%s>", tag)
-	end = fmt.Sprintf("</%s>", tag)
-	s = strings.Index(xml, start)
-	e = strings.Index(xml, end)
-	if s != -1 && e != -1 {
-		return xml[s+len(start) : e]
-	}
-	return ""
-}
-
 // aesKeyFromEncodingAESKey decodes a 43-character WeChat EncodingAESKey into a 32-byte AES key.
 func aesKeyFromEncodingAESKey(key string) ([]byte, error) {
 	if len(key) != 43 {
@@ -101,28 +65,16 @@ func aesKeyFromEncodingAESKey(key string) ([]byte, error) {
 	return k, nil
 }
 
+// wechatPadBlockSize 微信消息加解密使用的填充对齐长度。
+// 腾讯官方加解密实现按 32 字节对齐填充（并非 AES 块大小的 16）；
+// 按 16 对齐生成的密文微信服务器无法解密（2026-08-15 线上踩坑）。
+const wechatPadBlockSize = 32
+
 // pkcs7Pad pads data to a multiple of blockSize using PKCS7.
 func pkcs7Pad(data []byte, blockSize int) []byte {
 	padding := blockSize - len(data)%blockSize
 	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
 	return append(data, padtext...)
-}
-
-// pkcs7Unpad removes PKCS7 padding.
-func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
-	if blockSize <= 0 || len(data)%blockSize != 0 || len(data) == 0 {
-		return nil, errors.New("invalid padding data")
-	}
-	padding := int(data[len(data)-1])
-	if padding > blockSize || padding == 0 {
-		return nil, errors.New("invalid padding size")
-	}
-	for i := 0; i < padding; i++ {
-		if data[len(data)-1-i] != byte(padding) {
-			return nil, errors.New("invalid padding")
-		}
-	}
-	return data[:len(data)-padding], nil
 }
 
 // EncryptMsg encrypts a plaintext message using WeChat AES-256-CBC + PKCS7.
@@ -151,52 +103,13 @@ func EncryptMsg(plainMsg, appID, encodingAESKey string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create aes cipher: %w", err)
 	}
-	plainData = pkcs7Pad(plainData, aes.BlockSize)
+	// 填充按微信规范 32 字节对齐（与公众号官方加解密实现一致），
+	// 与 AES 块大小（16）无关。
+	plainData = pkcs7Pad(plainData, wechatPadBlockSize)
 	ciphertext := make([]byte, len(plainData))
 	mode := cipher.NewCBCEncrypter(block, aesKey[:aes.BlockSize])
 	mode.CryptBlocks(ciphertext, plainData)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
-}
-
-// DecryptMsg decrypts a base64-encoded ciphertext using WeChat AES-256-CBC + PKCS7.
-// Returns the plaintext message and the embedded appID.
-func DecryptMsg(cipherMsg, encodingAESKey string) (string, string, error) {
-	aesKey, err := aesKeyFromEncodingAESKey(encodingAESKey)
-	if err != nil {
-		return "", "", err
-	}
-
-	ciphertext, err := base64.StdEncoding.DecodeString(cipherMsg)
-	if err != nil {
-		return "", "", fmt.Errorf("decode cipher msg: %w", err)
-	}
-	if len(ciphertext)%aes.BlockSize != 0 {
-		return "", "", errors.New("ciphertext length is not a multiple of block size")
-	}
-
-	block, err := aes.NewCipher(aesKey)
-	if err != nil {
-		return "", "", fmt.Errorf("create aes cipher: %w", err)
-	}
-	plainData := make([]byte, len(ciphertext))
-	mode := cipher.NewCBCDecrypter(block, aesKey[:aes.BlockSize])
-	mode.CryptBlocks(plainData, ciphertext)
-
-	plainData, err = pkcs7Unpad(plainData, aes.BlockSize)
-	if err != nil {
-		return "", "", fmt.Errorf("unpad: %w", err)
-	}
-
-	if len(plainData) < 16+4 {
-		return "", "", errors.New("decrypted data too short")
-	}
-	msgLen := binary.BigEndian.Uint32(plainData[16:20])
-	if 20+int(msgLen) > len(plainData) {
-		return "", "", errors.New("invalid message length")
-	}
-	msg := string(plainData[20 : 20+msgLen])
-	appID := string(plainData[20+msgLen:])
-	return msg, appID, nil
 }
 
 // EncryptedXML represents the WeChat encrypted message wrapper.
@@ -220,6 +133,10 @@ func EncryptReplyXML(toUserName, plainXML, appID, encodingAESKey, token, timesta
 </xml>`, cipherText, signature, timestamp, nonce), nil
 }
 
+// 签名校验与解密已统一收敛到 wechatcrypto 包（C3/B6b-09）：
+// CheckSignature -> wechatcrypto.CheckSignature
+// CheckEncryptedSignature -> wechatcrypto.CheckEncryptedSignature
+// DecryptMsg -> wechatcrypto.DecryptMsg
 func sha1Sign(token, timestamp, nonce, encrypt string) string {
 	arr := []string{token, timestamp, nonce, encrypt}
 	sort.Strings(arr)

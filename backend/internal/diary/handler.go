@@ -240,7 +240,7 @@ func (h *Handler) GetDetails(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, ErrMemberNotFound) {
-			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeBadRequest, "member not found")
+			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeNotFound, "member not found")
 			return
 		}
 		middleware.JSONError(w, r, http.StatusInternalServerError, pkgerrors.CodeInternalError, "failed to get diary details")
@@ -286,7 +286,7 @@ func writeEntryValidationError(w http.ResponseWriter, r *http.Request, err error
 func writeDiaryServiceError(w http.ResponseWriter, r *http.Request, err error, action string) {
 	switch {
 	case errors.Is(err, ErrEntryNotFound):
-		middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeBadRequest, err.Error())
+		middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeNotFound, err.Error())
 	case errors.Is(err, ErrFileNotFound) || errors.Is(err, ErrNotFileOwner) || errors.Is(err, ErrFileNotImage) || errors.Is(err, ErrRecordTimeCrossDay) || errors.Is(err, ErrCoverImageNotFromDiary):
 		middleware.JSONError(w, r, http.StatusBadRequest, pkgerrors.CodeBadRequest, err.Error())
 	case errors.Is(err, ErrFamilyMismatch):
@@ -373,7 +373,7 @@ func (h *Handler) DeleteEntry(w http.ResponseWriter, r *http.Request) {
 	familyID, _, err := h.svc.DeleteEntry(ctx, userID, entryID)
 	if err != nil {
 		if errors.Is(err, ErrEntryNotFound) {
-			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeBadRequest, err.Error())
+			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeNotFound, err.Error())
 		} else if errors.Is(err, ErrPermissionDenied) {
 			middleware.JSONError(w, r, http.StatusForbidden, pkgerrors.CodeForbidden, err.Error())
 		} else {
@@ -461,7 +461,7 @@ func (h *Handler) UpdateMemory(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.svc.UpdateMemory(ctx, userID, req.ID, strings.TrimSpace(req.Title), strings.TrimSpace(req.Content), recordTime); err != nil {
 		if errors.Is(err, ErrMemoryNotFound) {
-			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeBadRequest, err.Error())
+			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeNotFound, err.Error())
 			return
 		}
 
@@ -484,7 +484,7 @@ func (h *Handler) DeleteMemory(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.svc.DeleteMemory(ctx, userID, memoryID); err != nil {
 		if errors.Is(err, ErrMemoryNotFound) {
-			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeBadRequest, err.Error())
+			middleware.JSONError(w, r, http.StatusNotFound, pkgerrors.CodeNotFound, err.Error())
 			return
 		}
 		middleware.JSONError(w, r, http.StatusInternalServerError, pkgerrors.CodeInternalError, "failed to delete memory")
@@ -523,6 +523,10 @@ func (h *Handler) CreateAutoEntry(w http.ResponseWriter, r *http.Request) {
 
 	entryID, familyID, _, err := h.svc.CreateAutoEntry(ctx, userID, req.Lat, req.Lon)
 	if err != nil {
+		if errors.Is(err, ErrDailyReverseQuotaExceeded) {
+			middleware.JSONError(w, r, http.StatusTooManyRequests, pkgerrors.BizRateLimited, "daily reverse geocode quota exceeded")
+			return
+		}
 		middleware.JSONError(w, r, http.StatusInternalServerError, pkgerrors.CodeInternalError, "failed to create auto entry")
 		return
 	}

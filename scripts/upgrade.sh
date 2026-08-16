@@ -21,11 +21,20 @@ echo "============================================"
 
 # 1. 拉取代码
 echo "[1/4] 拉取最新代码 ..."
+# detached HEAD（rollback.sh 切到指定 commit 后）下 git pull 会失败且报错难懂，先给出明确指引。
+if ! git symbolic-ref -q HEAD >/dev/null 2>&1; then
+  echo "       ❌ 当前处于 detached HEAD（可能由 rollback.sh 造成），请先执行 git checkout open 再升级" >&2
+  exit 1
+fi
 git pull origin open
 
 # 2. 备份
 echo "[2/4] 备份数据库 ..."
 mkdir -p backups
+if ! docker compose ps --status running postgres 2>/dev/null | grep -q postgres; then
+  echo "       ❌ postgres 容器未运行，无法备份，请先启动服务" >&2
+  exit 1
+fi
 docker compose exec -T postgres pg_dump -U papafeiji papafeiji | gzip > "${BACKUP_FILE}"
 echo "       备份完成: ${BACKUP_FILE}"
 

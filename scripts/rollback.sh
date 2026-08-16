@@ -36,6 +36,10 @@ fi
 # 1. 备份
 echo "[1/4] 备份数据库 ..."
 mkdir -p backups
+if ! docker compose ps --status running postgres 2>/dev/null | grep -q postgres; then
+  echo "       ❌ postgres 容器未运行，无法备份，请先启动服务" >&2
+  exit 1
+fi
 docker compose exec -T postgres pg_dump -U papafeiji papafeiji | gzip > "${BACKUP_FILE}"
 echo "       备份完成: ${BACKUP_FILE}"
 

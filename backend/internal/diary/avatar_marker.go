@@ -39,6 +39,10 @@ func (s *Service) buildTrajectoryMarkers(ctx context.Context, locs []sqlc.ListLo
 			for i := 0; i < len(points) && len(sampled) < maxPointsPerUser; i += step {
 				sampled = append(sampled, points[i])
 			}
+			// 强制保留最后一个（时间最新）定位点，轨迹图终点与用户当前位置一致。
+			if len(sampled) > 0 && sampled[len(sampled)-1] != points[len(points)-1] {
+				sampled[len(sampled)-1] = points[len(points)-1]
+			}
 			userPoints[uid] = sampled
 		}
 	}
@@ -88,6 +92,11 @@ func (s *Service) buildTrajectoryMarkers(ctx context.Context, locs []sqlc.ListLo
 	var markers []string
 	for _, uid := range userIDs {
 		points := userPoints[uid]
+		// 全局等距抽样可能使某用户被抽到 0 个点；跳过无坐标用户，避免生成只有 icon 无坐标的
+		// 非法 marker（违反 D016d 的 icon:url|lat,lon|... 格式，可能致腾讯静态地图整图报错）。
+		if len(points) == 0 {
+			continue
+		}
 		info := markerMap[uid]
 		var markerURL string
 		if info.path == "" {

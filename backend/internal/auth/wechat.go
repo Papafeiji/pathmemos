@@ -99,9 +99,10 @@ func (c *WechatClient) Jscode2session(ctx context.Context, code string) (*Wechat
 	if result.ErrCode != 0 {
 		slog.ErrorContext(ctx, "wechat jscode2session error", slog.Int("errcode", result.ErrCode), slog.String("errmsg", result.ErrMsg))
 		switch result.ErrCode {
-		case 40029, 40163, -1:
+		case 40029, 40163:
 			return nil, fmt.Errorf("%w: code=%d msg=%s", ErrWechatInvalidCode, result.ErrCode, result.ErrMsg)
 		default:
+			// 含 -1（系统繁忙）：归入可重试的服务错误，避免误报"code 无效"引导用户重登。
 			return nil, fmt.Errorf("%w: code=%d msg=%s", ErrWechatService, result.ErrCode, result.ErrMsg)
 		}
 	}
@@ -164,7 +165,7 @@ func (c *WechatClient) GetPhoneNumber(ctx context.Context, code string) (string,
 	if result.ErrCode != 0 {
 		slog.ErrorContext(ctx, "wechat getPhoneNumber error", slog.Int("errcode", result.ErrCode), slog.String("errmsg", result.ErrMsg))
 		switch result.ErrCode {
-		case 40029, 40163, -1:
+		case 40029, 40163:
 			return "", fmt.Errorf("%w: code=%d msg=%s", ErrWechatInvalidCode, result.ErrCode, result.ErrMsg)
 		default:
 			return "", fmt.Errorf("%w: code=%d msg=%s", ErrWechatService, result.ErrCode, result.ErrMsg)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -335,7 +336,16 @@ func (h *Handler) handleListMemoriesTool(ctx context.Context, userID string, id 
 	if err != nil {
 		return jsonRPCErrorResponse(id, -32603, "查询失败，请重试")
 	}
+	// R3：与 REST 端点（GetDiary/ListMemories）保持同一字节预算截断策略。
+	// 截断时在正文末尾附加明确提示，并在结果对象上带结构化 truncated 标记——
+	// MCP 最佳实践：让模型与客户端都能感知截断，提示用户缩小日期范围/limit，
+	// 而不是整包失败 500 或静默返回不完整数据。
+	items, truncated := truncateMemoryItems(items)
 	text := formatMemoryText(items)
+	if truncated {
+		text += "\n\n[注意] 结果数量过多，以上仅返回最近的 " + strconv.Itoa(len(items)) +
+			" 条。请缩小 start_date/end_date 范围或减小 limit 参数以获取完整结果。"
+	}
 	return &jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
@@ -343,6 +353,7 @@ func (h *Handler) handleListMemoriesTool(ctx context.Context, userID string, id 
 			"content": []map[string]string{
 				{"type": "text", "text": text},
 			},
+			"truncated": truncated,
 		},
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,6 +27,9 @@ const (
 	dailyQuotaKeyPrefix  = "ai:daily_chat"
 	maxChatBodySize      = 32 * 1024 // 32KB，足以覆盖 2500 code points 及 JSON 开销
 )
+
+// requestIDPattern 限制客户端幂等标识格式：8~64 位字母数字/下划线/连字符。
+var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
 type Handler struct {
 	router  chi.Router
@@ -48,7 +52,8 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserID(ctx)
 
 	var req struct {
-		Message string `json:"message"`
+		Message   string `json:"message"`
+		RequestID string `json:"request_id"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, maxChatBodySize); err != nil {
 		var maxBytesErr *http.MaxBytesError
@@ -69,6 +74,11 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
 		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "message too long")
 		return
 	}
+	// R4：request_id 为客户端幂等标识（断线重连复用），限定字符集与长度防止脏键/超大键。
+	if req.RequestID != "" && !requestIDPattern.MatchString(req.RequestID) {
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request_id")
+		return
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -85,7 +95,7 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
 	streamCtx, cancel := context.WithTimeout(ctx, AIStreamTimeout)
 	defer cancel()
 
-	_, err := h.service.Chat(streamCtx, userID, msg, func(chunk string) error {
+	_, err := h.service.Chat(streamCtx, userID, msg, req.RequestID, func(chunk string) error {
 		if err := writeSSEData(w, flusher, chunk); err != nil {
 
 			return err

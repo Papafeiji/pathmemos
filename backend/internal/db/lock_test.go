@@ -13,24 +13,39 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// mockLockEntry 记录锁 token 与过期时间（B2-21：mock 支持过期语义，可测续期/TTL 边界）。
+type mockLockEntry struct {
+	token     string
+	expiresAt time.Time // 零值表示永不过期
+}
+
 // mockLockClient implements LockClient with an in-memory store.
 type mockLockClient struct {
 	mu    sync.Mutex
-	store map[string]string // key -> token
+	store map[string]mockLockEntry // key -> entry
 }
 
 func newMockLockClient() *mockLockClient {
-	return &mockLockClient{store: make(map[string]string)}
+	return &mockLockClient{store: make(map[string]mockLockEntry)}
+}
+
+func (e mockLockEntry) expired(now time.Time) bool {
+	return !e.expiresAt.IsZero() && now.After(e.expiresAt)
 }
 
 func (m *mockLockClient) SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.BoolCmd {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	token, _ := value.(string)
-	if _, exists := m.store[key]; exists {
+	now := time.Now()
+	if entry, exists := m.store[key]; exists && !entry.expired(now) {
 		return redis.NewBoolResult(false, nil)
 	}
-	m.store[key] = token
+	entry := mockLockEntry{token: token}
+	if expiration > 0 {
+		entry.expiresAt = now.Add(expiration)
+	}
+	m.store[key] = entry
 	return redis.NewBoolResult(true, nil)
 }
 
@@ -41,13 +56,14 @@ func (m *mockLockClient) Eval(ctx context.Context, script string, keys []string,
 	key := keys[0]
 	storedToken := m.store[key]
 
+	now := time.Now()
 	if strings.Contains(script, "del") {
 		// Unlock script: verify token, then delete.
 		if len(args) < 1 {
 			return redis.NewCmdResult(nil, fmt.Errorf("missing token arg"))
 		}
 		token, _ := args[0].(string)
-		if storedToken == token && storedToken != "" {
+		if storedToken.token == token && storedToken.token != "" && !storedToken.expired(now) {
 			delete(m.store, key)
 			return redis.NewCmdResult(int64(1), nil)
 		}
@@ -55,12 +71,15 @@ func (m *mockLockClient) Eval(ctx context.Context, script string, keys []string,
 	}
 
 	if strings.Contains(script, "expire") {
-		// Extend script: verify token, return 1 if matched, 0 otherwise.
-		if len(args) < 1 {
-			return redis.NewCmdResult(nil, fmt.Errorf("missing token arg"))
+		// Extend script: verify token 并更新过期时间，返回 1 匹配，0 不匹配。
+		if len(args) < 2 {
+			return redis.NewCmdResult(nil, fmt.Errorf("missing extend args"))
 		}
 		token, _ := args[0].(string)
-		if storedToken == token && storedToken != "" {
+		ttlMS, _ := args[1].(int64)
+		if storedToken.token == token && storedToken.token != "" && !storedToken.expired(now) {
+			storedToken.expiresAt = now.Add(time.Duration(ttlMS) * time.Millisecond)
+			m.store[key] = storedToken
 			return redis.NewCmdResult(int64(1), nil)
 		}
 		return redis.NewCmdResult(int64(0), nil)
@@ -83,7 +102,7 @@ func TestTryLock_Success(t *testing.T) {
 	if token == "" {
 		t.Fatal("expected non-empty token")
 	}
-	if mock.store["key1"] != token {
+	if mock.store["key1"].token != token {
 		t.Fatal("token not stored in mock")
 	}
 }
@@ -133,7 +152,7 @@ func TestUnlock_TokenMismatch(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Key should still exist with original token.
-	if mock.store["key1"] != token {
+	if mock.store["key1"].token != token {
 		t.Fatal("key should remain with original token after wrong-token unlock")
 	}
 }
@@ -176,6 +195,49 @@ func TestExtend_TokenMismatch(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected extend to fail with wrong token")
+	}
+}
+
+func TestTryLock_ExpiredLockCanBeReacquired(t *testing.T) {
+	mock := newMockLockClient()
+	lock := NewLock(mock)
+
+	ok, _, err := lock.TryLock(context.Background(), "key1", 30*time.Millisecond)
+	if err != nil || !ok {
+		t.Fatalf("first lock failed: err=%v ok=%v", err, ok)
+	}
+	time.Sleep(60 * time.Millisecond)
+
+	// TTL 过期后应可重新获取（B2-21 过期边界）。
+	ok, _, err = lock.TryLock(context.Background(), "key1", 10*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected expired lock to be reacquirable")
+	}
+}
+
+func TestExtend_RefreshesExpiration(t *testing.T) {
+	mock := newMockLockClient()
+	lock := NewLock(mock)
+
+	_, token, _ := lock.TryLock(context.Background(), "key1", 10*time.Second)
+
+	// 第一次续期把 TTL 缩短到 30ms，再续期回 10s。
+	ok, err := lock.Extend(context.Background(), "key1", token, 30*time.Millisecond)
+	if err != nil || !ok {
+		t.Fatalf("extend failed: err=%v ok=%v", err, ok)
+	}
+	time.Sleep(60 * time.Millisecond)
+
+	// 锁已按 30ms 过期，再续期应失败（过期边界）。
+	ok, err = lock.Extend(context.Background(), "key1", token, 10*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatal("expected extend to fail after lock expired")
 	}
 }
 

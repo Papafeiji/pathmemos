@@ -48,6 +48,14 @@ Page({
     desktopGuideHintRight: 0,
     followImgUrl: `${getHelpBaseURL()}/follow.png`,
     isPrivateBackend: false,
+    confirmDialog: {
+      visible: false,
+      title: '',
+      content: '',
+      cancelText: '',
+      confirmText: '',
+      confirmType: 'default',
+    },
   },
 
   _isDestroyed: false,
@@ -125,6 +133,7 @@ Page({
       wx.showToast({ title: (this as any).$t('set.nicknameTooLong'), icon: 'none' });
       return;
     }
+    // 按 FP063/FP076：昵称修改为普通业务，不做函数级防重入锁。
     (this as any)._submitting = true;
     if ((this as any)._submitNicknameCancelToken) {
       try { (this as any)._submitNicknameCancelToken.cancel(); } catch {}
@@ -153,6 +162,7 @@ Page({
   },
 
   async onChooseAvatar(e: any) {
+    if ((this as any)._updatingAvatar) return;
     (this as any)._updatingAvatar = true;
     if ((this as any)._avatarCancelToken) {
       try { (this as any)._avatarCancelToken.cancel(); } catch {}
@@ -168,6 +178,10 @@ Page({
     } catch (error: any) {
       if ((this as any)._isDestroyed) return;
       if (error?.message === 'request:abort') return;
+      if (error?.code === 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED') {
+        this.showStorageLimitDialog();
+        return;
+      }
       if (!error?._handledByModal) {
         wx.showToast({ title: (this as any).$t('set.updateFail'), icon: 'none' });
       }
@@ -175,6 +189,28 @@ Page({
       (this as any)._updatingAvatar = false;
       (this as any)._avatarCancelToken = null;
     }
+  },
+
+  showStorageLimitDialog() {
+    (this as any)._safeSetData({
+      confirmDialog: {
+        visible: true,
+        title: (this as any).$t('common.tip'),
+        content: (this as any).$t('error.imageStorageLimitExceeded'),
+        cancelText: (this as any).$t('common.cancel'),
+        confirmText: (this as any).$t('vip.upgradeNow'),
+        confirmType: 'default',
+      },
+    });
+  },
+
+  onConfirmDialogConfirm() {
+    (this as any)._safeSetData({ 'confirmDialog.visible': false });
+    wx.navigateTo({ url: '/pages/sub/Vip/Vip' });
+  },
+
+  onConfirmDialogCancel() {
+    (this as any)._safeSetData({ 'confirmDialog.visible': false });
   },
 
   goCommonAddresses() {
@@ -227,6 +263,30 @@ Page({
         const errMsg = err?.errMsg || '';
         if (errMsg.includes('cancel')) return;
         wx.showToast({ title: (this as any).$t('error.DEFAULT'), icon: 'none' });
+      },
+    });
+  },
+
+  // R4：解绑手机号——不消耗微信认证费用、不受每天一次日限约束，
+  // 绑错号码当天即可解绑（重新绑定仍受日限与费用约束，属产品要求）。
+  onUnbindPhoneTap() {
+    const self = this as any;
+    if (!self.data.phone) return;
+    wx.showModal({
+      title: self.$t('set.unbindPhone'),
+      content: self.$t('set.unbindPhoneConfirm'),
+      confirmText: self.$t('set.unbindPhone'),
+      cancelText: self.$t('common.cancel'),
+      success: async (res: any) => {
+        if (!res.confirm || self._isDestroyed) return;
+        try {
+          await request.post('/auth/phone/unbind', { data: {} }, true);
+          (self as any)._safeSetData({ phone: '', canModifyToday: true });
+          wx.showToast({ title: self.$t('set.unbindPhoneSuccess'), icon: 'success' });
+        } catch (e: any) {
+          if (self._isDestroyed) return;
+          wx.showToast({ title: getErrorMessage(e, self.$t('error.DEFAULT')), icon: 'none' });
+        }
       },
     });
   },

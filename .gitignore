@@ -15,6 +15,7 @@ mcp-worker/.wrangler/
 api-worker/node_modules/
 api-worker/.wrangler/
 deploy/private.*.key
+deploy/miniapp-uploader/node_modules/
 dump.rdb
 backups/
 uploads/

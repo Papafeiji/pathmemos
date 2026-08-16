@@ -4,7 +4,7 @@ import type { CancelToken } from '../../utils/http';
 import { formatVipInfo } from '../../utils/vip';
 import { openUrl } from '../../utils/util';
 import { logger } from '../../utils/logger';
-import { getHelpBaseURL } from '../../config/index';
+import { getHelpBaseURL, EXPORT_GUIDE_URL } from '../../config/index';
 import { getBackendMode } from '../../utils/storage';
 import themeBehavior from '../../behaviors/theme';
 import i18nBehavior from '../../behaviors/i18n';
@@ -103,7 +103,8 @@ Page({
   },
 
   toExport() {
-    (this as any)._openWeb('https://www.xiaohongshu.com/explore/66362ab7000000001e038b66');
+    // 链接集中在 config 维护（运营替换笔记时无需改页面代码）。
+    (this as any)._openWeb(EXPORT_GUIDE_URL);
   },
 
   toChat() {

@@ -32,12 +32,20 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// SessionStore 抽象会话的创建与删除（*middleware.SessionManager 为生产实现），
+// 便于登录流程单元测试注入 mock。
+type SessionStore interface {
+	Create(ctx context.Context, userID string) (string, error)
+	Delete(ctx context.Context, sessionID string) error
+	DeleteAll(ctx context.Context, userID string) error
+}
+
 type Handler struct {
 	router        chi.Router
 	pool          *db.Pool
 	bgPool        *db.Pool
 	rdb           *redis.Client
-	sessions      *middleware.SessionManager
+	sessions      SessionStore
 	wechat        *WechatClient
 	vipService    VIPService
 	familyService FamilyService
@@ -83,6 +91,7 @@ func (h *Handler) RegisterProtected(router chi.Router) {
 	router.Get("/auth/phone", h.GetPhone)
 	router.Post("/auth/phone/bind", h.BindPhone)
 	router.Post("/auth/phone/unbind", h.UnbindPhone)
+	router.Post("/auth/inviter", h.BindInviter)
 	// DELETE /auth/account 由 main.go 单独注册（含 IP 限流）
 }
 
@@ -142,6 +151,9 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	mpAccount, accErr := h.pool.Queries().GetWxMPAccountByUserID(ctx, pgtype.Text{String: user.ID, Valid: true})
 	if accErr == nil {
 		mpSubscribed = mpAccount.Subscribed
+	} else {
+		// R2-L08：查询失败不再静默——记录告警便于排查订阅状态偏差。
+		slog.WarnContext(ctx, "get wx mp account failed, mpSubscribed defaults to false", slog.String("user_id", user.ID), slog.Any("error", accErr))
 	}
 	userInfo := userinfo.Build(ctx, user, h.vipService, h.defaultAvatar, mpSubscribed)
 	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{
@@ -198,6 +210,15 @@ func (h *Handler) GetPhone(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// phoneModificationLockedToday 判断用户今天是否已绑定过手机号：
+// 服务端日限（B1-10），与客户端 canModifyToday 语义一致，防止绕过客户端限制频繁调用微信接口。
+func phoneModificationLockedToday(user sqlc.GetUserByIDRow) bool {
+	if !user.PhoneBindTime.Valid {
+		return false
+	}
+	return user.PhoneBindTime.Time.In(timeutil.Shanghai).Format("2006-01-02") == timeutil.NowShanghai().Format("2006-01-02")
+}
+
 func (h *Handler) BindPhone(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userID := middleware.UserID(ctx)
@@ -207,6 +228,18 @@ func (h *Handler) BindPhone(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
 		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		return
+	}
+
+	// M1：日限检查先于微信接口调用——被限用户不再消耗微信 code 交换额度。
+	user, err := h.pool.Queries().GetUserByID(ctx, userID)
+	if err != nil {
+		slog.ErrorContext(ctx, "bind phone get user failed", slog.String("user_id", userID), slog.Any("error", err))
+		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to get user")
+		return
+	}
+	if phoneModificationLockedToday(user) {
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "phone can only be modified once per day")
 		return
 	}
 
@@ -251,17 +284,10 @@ func (h *Handler) UnbindPhone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	phone, err := h.wechat.GetPhoneNumber(ctx, req.Code)
-	if err != nil {
-		slog.ErrorContext(ctx, "unbind phone getPhoneNumber failed", slog.String("user_id", userID), slog.Any("error", err))
-		if stderrors.Is(err, ErrWechatInvalidCode) {
-			middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid phone code")
-		} else {
-			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to verify phone number")
-		}
-		return
-	}
-
+	// R4：解绑不再调用微信 GetPhoneNumber（每次 code 交换都会产生认证费用），
+	// 因此也不受"每天最多一次"的日限约束——绑错号码当天即可解绑重绑。
+	// 安全边界：登录态持有者即账号所有者，解绑自己账号的手机号无需二次验证；
+	// 绑定仍保留微信验证 + 日限（产品要求：每天最多绑定一次）。
 	user, err := h.pool.Queries().GetUserByID(ctx, userID)
 	if err != nil {
 		slog.ErrorContext(ctx, "unbind phone get user failed", slog.String("user_id", userID), slog.Any("error", err))
@@ -270,10 +296,6 @@ func (h *Handler) UnbindPhone(w http.ResponseWriter, r *http.Request) {
 	}
 	if !user.PhoneNumber.Valid || user.PhoneNumber.String == "" {
 		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "phone not bound")
-		return
-	}
-	if phone != user.PhoneNumber.String {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "phone number mismatch")
 		return
 	}
 
@@ -288,6 +310,98 @@ func (h *Handler) UnbindPhone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{})
+}
+
+// BindInviter 登录后补绑邀请人（R4）。
+// 极弱网下新用户可能在场景码解析完成前就完成登录，错过注册期绑定（index.ts 1.5s 竞态）；
+// 客户端在解析完成后调用本接口补绑。幂等约束：
+//   - 已有邀请人（invited_by 非空或存在 user_invites 记录）→ 幂等成功，不重复奖励；
+//   - 注册超过 7 天 → 静默成功不绑定（邀请奖励面向新用户，防老用户扫码刷奖励）；
+//   - 邀请人不存在/自邀 → 拒绝。
+//
+// 奖励逻辑与注册期绑定共用 applyInviteRewardsWithTx，保证一致。
+func (h *Handler) BindInviter(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID := middleware.UserID(ctx)
+
+	var req struct {
+		Inviter string `json:"inviter"`
+	}
+	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		return
+	}
+	if req.Inviter == "" || req.Inviter == userID {
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid inviter")
+		return
+	}
+
+	if _, err := h.pool.Queries().GetUserByID(ctx, req.Inviter); err != nil {
+		if stderrors.Is(err, pgx.ErrNoRows) {
+			middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "inviter not found")
+			return
+		}
+		slog.ErrorContext(ctx, "bind inviter check failed", slog.String("user_id", userID), slog.Any("error", err))
+		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to check inviter")
+		return
+	}
+
+	user, err := h.pool.Queries().GetUserByID(ctx, userID)
+	if err != nil {
+		slog.ErrorContext(ctx, "bind inviter get user failed", slog.String("user_id", userID), slog.Any("error", err))
+		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to get user")
+		return
+	}
+	alreadyBound := user.InvitedBy.Valid && user.InvitedBy.String != ""
+	if !alreadyBound {
+		if _, err := h.pool.Queries().GetUserInviteByUserID(ctx, userID); err == nil {
+			alreadyBound = true
+		} else if !stderrors.Is(err, pgx.ErrNoRows) {
+			slog.ErrorContext(ctx, "bind inviter check invite record failed", slog.String("user_id", userID), slog.Any("error", err))
+			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to check invite record")
+			return
+		}
+	}
+	if alreadyBound {
+		middleware.JSON(w, r, http.StatusOK, map[string]interface{}{})
+		return
+	}
+	// 注册超过 7 天不补绑：邀请奖励面向新用户，防止老用户扫码刷 3+7 天 VIP。
+	if time.Since(user.CreatedAt.Time) > 7*24*time.Hour {
+		middleware.JSON(w, r, http.StatusOK, map[string]interface{}{})
+		return
+	}
+
+	err = db.WithTx(ctx, h.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
+		// 事务内行锁 + 幂等条件更新，杜绝并发双绑双奖励。
+		current, err := q.GetUserByIDForUpdate(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("lock user: %w", err)
+		}
+		if current.InvitedBy.Valid && current.InvitedBy.String != "" {
+			return nil
+		}
+		if _, err := q.GetUserInviteByUserID(ctx, userID); err == nil {
+			return nil
+		} else if !stderrors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("check invite record in tx: %w", err)
+		}
+		if _, err := q.UpdateUserInvitedBy(ctx, sqlc.UpdateUserInvitedByParams{
+			ID:        userID,
+			InvitedBy: toNullText(req.Inviter),
+		}); err != nil {
+			return fmt.Errorf("update user invited by: %w", err)
+		}
+		return h.applyInviteRewardsWithTx(ctx, q, userID, req.Inviter)
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "bind inviter failed", slog.String("user_id", userID), slog.Any("error", err))
+		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to bind inviter")
+		return
+	}
+
+	slog.InfoContext(ctx, "bind inviter success", slog.String("user_id", userID), slog.String("inviter", util.MaskID(req.Inviter)))
 	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{})
 }
 
@@ -313,7 +427,7 @@ func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	currentUser, err := h.pool.Queries().GetUserByID(ctx, userID)
 	if err != nil {
 		if stderrors.Is(err, pgx.ErrNoRows) {
-			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeBadRequest, "user not found")
+			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeNotFound, "user not found")
 			return
 		}
 		slog.ErrorContext(ctx, "delete account get user failed", slog.String("user_id", userID), slog.Any("error", err))
@@ -468,55 +582,8 @@ func (h *Handler) findOrCreateUser(ctx context.Context, session *WechatSession, 
 			return fmt.Errorf("issue trial vip: %w", err)
 		}
 
-		if inviterID != "" {
-			// 在事务内再次确认邀请人仍存在；若已被删除则跳过奖励，避免外键约束导致注册失败。
-			if _, checkErr := q.GetUserByID(ctx, inviterID); checkErr == nil {
-				inviteID, err := util.NewUUID()
-				if err != nil {
-					return fmt.Errorf("generate invite id: %w", err)
-				}
-				if _, err := q.CreateUserInvite(ctx, sqlc.CreateUserInviteParams{
-					ID:        inviteID,
-					UserID:    userID,
-					InviterID: inviterID,
-				}); err != nil {
-					return fmt.Errorf("create user invite: %w", err)
-				}
-
-				if err := h.vipService.ExtendVIPDaysWithTx(ctx, userID, 3, q); err != nil {
-					return fmt.Errorf("extend invitee vip: %w", err)
-				}
-				if _, err := q.MarkInviteeRewarded(ctx, inviteID); err != nil {
-					return fmt.Errorf("mark invitee rewarded: %w", err)
-				}
-
-				now := timeutil.NowShanghai()
-				monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, timeutil.Shanghai)
-				monthEnd := monthStart.AddDate(0, 1, 0)
-				if err := q.LockInviterReward(ctx, toNullText(inviterID)); err != nil {
-					return fmt.Errorf("lock inviter reward: %w", err)
-				}
-				rewardedDays, err := q.CountInviterMonthlyRewardDays(ctx, sqlc.CountInviterMonthlyRewardDaysParams{
-					InviterID:         inviterID,
-					RewardInviterAt:   pgtype.Timestamptz{Time: monthStart, Valid: true},
-					RewardInviterAt_2: pgtype.Timestamptz{Time: monthEnd, Valid: true},
-				})
-				if err != nil {
-					return fmt.Errorf("count inviter monthly reward days: %w", err)
-				}
-				if rewardedDays < 14 {
-					// Mark first, then extend, so concurrent logins cannot double-reward.
-					rewardedRows, err := q.MarkInviterRewarded(ctx, inviteID)
-					if err != nil {
-						return fmt.Errorf("mark inviter rewarded: %w", err)
-					}
-					if rewardedRows > 0 {
-						if err := h.vipService.ExtendVIPDaysWithTx(ctx, inviterID, 7, q); err != nil {
-							return fmt.Errorf("extend inviter vip: %w", err)
-						}
-					}
-				}
-			}
+		if err := h.applyInviteRewardsWithTx(ctx, q, userID, inviterID); err != nil {
+			return fmt.Errorf("apply invite rewards: %w", err)
 		}
 
 		if _, err := createOrGetUserInviteCode(ctx, q, userID); err != nil {
@@ -591,6 +658,68 @@ func (h *Handler) findOrCreateUser(ctx context.Context, session *WechatSession, 
 	}
 
 	return &newUser, true, nil
+}
+
+// applyInviteRewardsWithTx 邀请奖励下发（R4 抽取）：注册期绑定与登录后补绑共用同一实现，
+// 保证两条路径的奖励逻辑永不漂移。inviterID 为空时不做任何事。
+func (h *Handler) applyInviteRewardsWithTx(ctx context.Context, q *sqlc.Queries, inviteeID, inviterID string) error {
+	if inviterID == "" {
+		return nil
+	}
+	// 事务内确认邀请人仍存在；若已被删除则跳过奖励，避免外键约束失败。
+	// 瞬时 DB 错误不再静默吞掉（有日志可排查），但仍跳过奖励以保证注册主流程不被拖累。
+	if _, checkErr := q.GetUserByID(ctx, inviterID); checkErr != nil {
+		if !stderrors.Is(checkErr, pgx.ErrNoRows) {
+			slog.ErrorContext(ctx, "check inviter failed, skip invite reward", slog.String("inviter_id", inviterID), slog.Any("error", checkErr))
+		}
+		return nil
+	}
+	inviteID, err := util.NewUUID()
+	if err != nil {
+		return fmt.Errorf("generate invite id: %w", err)
+	}
+	if _, err := q.CreateUserInvite(ctx, sqlc.CreateUserInviteParams{
+		ID:        inviteID,
+		UserID:    inviteeID,
+		InviterID: inviterID,
+	}); err != nil {
+		return fmt.Errorf("create user invite: %w", err)
+	}
+
+	if err := h.vipService.ExtendVIPDaysWithTx(ctx, inviteeID, 3, q); err != nil {
+		return fmt.Errorf("extend invitee vip: %w", err)
+	}
+	if _, err := q.MarkInviteeRewarded(ctx, inviteID); err != nil {
+		return fmt.Errorf("mark invitee rewarded: %w", err)
+	}
+
+	now := timeutil.NowShanghai()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, timeutil.Shanghai)
+	monthEnd := monthStart.AddDate(0, 1, 0)
+	if err := q.LockInviterReward(ctx, toNullText(inviterID)); err != nil {
+		return fmt.Errorf("lock inviter reward: %w", err)
+	}
+	rewardedDays, err := q.CountInviterMonthlyRewardDays(ctx, sqlc.CountInviterMonthlyRewardDaysParams{
+		InviterID:         inviterID,
+		RewardInviterAt:   pgtype.Timestamptz{Time: monthStart, Valid: true},
+		RewardInviterAt_2: pgtype.Timestamptz{Time: monthEnd, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("count inviter monthly reward days: %w", err)
+	}
+	if rewardedDays < 14 {
+		// Mark first, then extend, so concurrent logins cannot double-reward.
+		rewardedRows, err := q.MarkInviterRewarded(ctx, inviteID)
+		if err != nil {
+			return fmt.Errorf("mark inviter rewarded: %w", err)
+		}
+		if rewardedRows > 0 {
+			if err := h.vipService.ExtendVIPDaysWithTx(ctx, inviterID, 7, q); err != nil {
+				return fmt.Errorf("extend inviter vip: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func generateUserInviteCode() string {

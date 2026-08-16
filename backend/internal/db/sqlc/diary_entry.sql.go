@@ -149,6 +149,15 @@ func (q *Queries) CreateDiaryEntryImage(ctx context.Context, arg CreateDiaryEntr
 	return err
 }
 
+const deleteDiaryEntryByID = `-- name: DeleteDiaryEntryByID :exec
+DELETE FROM diary_entries WHERE id = $1
+`
+
+func (q *Queries) DeleteDiaryEntryByID(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, deleteDiaryEntryByID, id)
+	return err
+}
+
 const deleteDiaryEntryImages = `-- name: DeleteDiaryEntryImages :exec
 DELETE FROM diary_entry_images WHERE diary_entry_id = $1
 `
@@ -158,24 +167,15 @@ func (q *Queries) DeleteDiaryEntryImages(ctx context.Context, diaryEntryID strin
 	return err
 }
 
-const deleteDiaryEntryReturningFileIDs = `-- name: DeleteDiaryEntryReturningFileIDs :many
-WITH locked AS (
-    SELECT diary_entries.id FROM diary_entries WHERE diary_entries.id = $1 FOR UPDATE
-),
-deleted_images AS (
-    DELETE FROM diary_entry_images WHERE diary_entry_id = $1
-    RETURNING file_id
-),
-deleted_entry AS (
-    DELETE FROM diary_entries WHERE id = $1
-)
-SELECT DISTINCT file_id FROM deleted_images
+const deleteDiaryEntryImagesReturningFileIDs = `-- name: DeleteDiaryEntryImagesReturningFileIDs :many
+DELETE FROM diary_entry_images WHERE diary_entry_id = $1
+RETURNING file_id
 `
 
-// 在事务内锁定条目行、删除图片关联并返回 file_id，最后删除日记条目。
-// FOR UPDATE 阻止并发更新条目，确保返回的 file_id 与实际被级联删除的图片完全一致。
-func (q *Queries) DeleteDiaryEntryReturningFileIDs(ctx context.Context, id string) ([]string, error) {
-	rows, err := q.db.Query(ctx, deleteDiaryEntryReturningFileIDs, id)
+// 先删图片关联并返回 file_id，再由调用方在同一事务内删除条目。
+// 拆成两条语句，避免数据修改 CTE 顺序不可预测导致 file_id 漏返回。
+func (q *Queries) DeleteDiaryEntryImagesReturningFileIDs(ctx context.Context, diaryEntryID string) ([]string, error) {
+	rows, err := q.db.Query(ctx, deleteDiaryEntryImagesReturningFileIDs, diaryEntryID)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +224,7 @@ SELECT id, address, detail_address
 FROM diary_entries
 WHERE created_by = $1
   AND text = '（自动记录）'
-ORDER BY record_time DESC
+ORDER BY record_time DESC NULLS LAST
 LIMIT 1
 `
 
@@ -248,7 +248,7 @@ JOIN diaries d ON d.id = e.diary_id
 WHERE e.created_by = $1
   AND e.text = '（自动记录）'
   AND d.record_date = $2
-ORDER BY e.record_time DESC
+ORDER BY e.record_time DESC NULLS LAST
 LIMIT 1
 `
 

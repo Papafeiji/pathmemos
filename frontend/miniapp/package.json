@@ -17,36 +17,7 @@
     "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^8.57.0",
     "miniprogram-api-typings": "^2.8.3-1",
-    "miniprogram-ci": "^2.1.42",
     "typescript": "^6.0.3"
-  },
-  "overrides": {
-    "@babel/core": "7.29.7",
-    "@babel/helpers": "7.29.7",
-    "@babel/runtime": "7.29.7",
-    "@babel/traverse": "7.29.7",
-    "@babel/plugin-transform-modules-systemjs": "7.29.7",
-    "protobufjs": "7.6.5",
-    "tmp": "0.2.7",
-    "miniprogram-ci": {
-      "minimatch": "3.1.5"
-    },
-    "babel-core": {
-      "json5": "1.0.2"
-    },
-    "request": {
-      "qs": "6.15.3",
-      "form-data": "2.5.6",
-      "tough-cookie": "4.1.4"
-    },
-    "cacheable-request": {
-      "http-cache-semantics": "4.1.1"
-    },
-    "fast-xml-parser": "5.10.1",
-    "conf": {
-      "ajv": "8.20.0",
-      "ajv-formats": "3.0.1"
-    }
   },
   "main": "miniprogram/app.ts",
   "description": ""

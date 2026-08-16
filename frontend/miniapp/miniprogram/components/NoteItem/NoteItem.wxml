@@ -27,7 +27,7 @@
     <view class="main">
       <view class="address-list" wx:if="{{data.familyMemberAddressConcatRecords.length}}">
         <view class="address-item" wx:for="{{data.familyMemberAddressConcatRecords}}" wx:key="index">
-          <view class="item-line" style="background-color: {{data.dotColor}};"></view>
+          <view class="item-line" style="background-color: {{dotColor}};"></view>
           <image mode="aspectFill" class="avatar" src="{{item.familyMemberAvatar || '../../image/logo.png'}}" lazy-load />
           <view class="address">{{item.familyMemberAddressConcat}}</view>
         </view>

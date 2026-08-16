@@ -59,6 +59,8 @@ func configWithAllFilledExcept(emptyVar string) *Config {
 		WechatVirtualAppKeyProd:    "prod-key",
 		WechatVirtualAppKeySandbox: "sandbox-key",
 		WechatMsgToken:             "token",
+		WechatVirtualCallbackToken: "cb-token",
+		WechatVirtualCallbackAESKey: "cb-aes-key",
 		TencentMapKeys:             []string{"map-key"},
 		AIAPIKey:                   "ai-key",
 		APIHost:                    "api.example.com",
@@ -88,6 +90,10 @@ func configWithAllFilledExcept(emptyVar string) *Config {
 		cfg.APIHost = ""
 	case "WECHAT_MSG_TOKEN":
 		cfg.WechatMsgToken = ""
+	case "WECHAT_VIRTUAL_CALLBACK_TOKEN":
+		cfg.WechatVirtualCallbackToken = ""
+	case "WECHAT_VIRTUAL_CALLBACK_AES_KEY":
+		cfg.WechatVirtualCallbackAESKey = ""
 	}
 
 	return cfg

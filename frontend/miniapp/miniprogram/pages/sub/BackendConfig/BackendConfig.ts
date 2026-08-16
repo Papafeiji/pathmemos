@@ -10,7 +10,7 @@ import {
   STORAGE_KEY_URL,
   STORAGE_KEY_API_KEY,
 } from '../../../utils/storage';
-import { WORKER_BASE_URL } from '../../../config/index';
+import { WORKER_BASE_URL, getHelpBaseURL } from '../../../config/index';
 import { openUrl } from '../../../utils/util';
 import { logger } from '../../../utils/logger';
 import themeBehavior from '../../../behaviors/theme';
@@ -71,6 +71,13 @@ Page({
     (this as any)._isHidden = false;
     (this as any)._applyPendingSetData();
     this.updateNavTitle();
+    // 保存成功发生在隐藏态时补执行关键收尾（清 session + 回首页重登），
+    // 否则旧 session 会持续请求新后端直到手动重启。
+    if ((this as any)._pendingReLogin) {
+      (this as any)._pendingReLogin = false;
+      clearUserData();
+      wx.reLaunch({ url: '/pages/index/index' });
+    }
   },
 
   updateNavTitle() {
@@ -120,11 +127,14 @@ Page({
   },
 
   openHomepage() {
-    openUrl('https://papafeiji.cn');
+    // R2-F16：官方站点链接收敛到 config 集中管理。
+    openUrl(getHelpBaseURL());
   },
 
   async testConnection() {
     if ((this as any)._isDestroyed) return;
+    // F5-10：与保存互斥（两者共用 _cancelToken，并发会互相取消对方在途请求）。
+    if (this.data.testing || this.data.saving) return;
     const { backendUrl, apiKey } = this.data;
     let url = backendUrl.trim();
     if (!url || !apiKey.trim()) {
@@ -170,8 +180,10 @@ Page({
         });
       }
     } catch (err: any) {
-      if ((this as any)._isDestroyed || (this as any)._isHidden || err?.message === 'request:abort') return;
+      // 取消/切后台/卸载等路径同样要清理刚写入的临时注册：测试 Key 与生效 Key 相同但
+      // URL 不同时，残留映射会把线上请求永久路由到测试地址（与成功路径的恢复逻辑对称）。
       this._cleanupTestRegistration(apiKey.trim());
+      if ((this as any)._isDestroyed || (this as any)._isHidden || err?.message === 'request:abort') return;
       wx.showModal({
         title: (this as any).$t('backendConfig.testFail'),
         content: registerFailMessage(err, (this as any).$t.bind(this), (this as any).$t('error.networkFail')),
@@ -232,6 +244,8 @@ Page({
 
   async save() {
     if ((this as any)._isDestroyed) return;
+    // F5-10：与测试互斥（两者共用 _cancelToken，并发会互相取消对方在途请求）。
+    if (this.data.saving || this.data.testing) return;
     const { enabled, backendUrl, apiKey } = this.data;
     let normalizedUrl = backendUrl.trim();
     if (enabled) {
@@ -274,7 +288,13 @@ Page({
         safeSetStorage(STORAGE_KEY_API_KEY, '');
         safeSetStorage(STORAGE_KEY_MODE, 'saas');
       }
-      if ((this as any)._isDestroyed || (this as any)._isHidden) return;
+      if ((this as any)._isDestroyed) return;
+      // 保存本身已生效（storage + Worker 注册），"清 session + reLaunch"是关键收尾：
+      // 页面隐藏态时跳过会导致旧 session 持续打新后端，这里挂起并在 onShow 补执行。
+      if ((this as any)._isHidden) {
+        (this as any)._pendingReLogin = true;
+        return;
+      }
       wx.showModal({
         title: (this as any).$t('backendConfig.saveSuccess'),
         content: (this as any).$t('backendConfig.reloginTip'),

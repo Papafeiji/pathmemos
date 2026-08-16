@@ -100,22 +100,6 @@ Component({
 
   
   methods: {
-    getFieldValue(field: string): any {
-      const parts = field.replace(/^data\./, '').split('.');
-      let cur: any = this.data.data;
-      for (const part of parts) {
-        if (cur === null || cur === undefined) return undefined;
-        const arrMatch = part.match(/^([^[]+)\[(\d+)\]$/);
-        if (arrMatch) {
-          const arr = cur[arrMatch[1]];
-          if (!Array.isArray(arr)) return undefined;
-          cur = arr[parseInt(arrMatch[2], 10)];
-        } else {
-          cur = cur[part];
-        }
-      }
-      return cur;
-    },
     formatData(data: any) {
       if (!data) return { _navigateUrl: '', familyMemberAddressConcatRecords: [] };
       const recordDate = data.recordDate || '';
@@ -193,6 +177,7 @@ Component({
 
     async onConfirmDialogConfirm() {
       if (!(this as any)._isAlive()) return;
+      // 按 FP076：日记删除为普通业务，不做函数级防重入锁；重复删除由后端兜底。
       const id = this.data.info?.id;
       if (!id) return;
       (this as any)._deleting = true;

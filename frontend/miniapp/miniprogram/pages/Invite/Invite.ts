@@ -21,6 +21,7 @@ Page({
   _creatingInviteLink: false,
 
   _downloadTask: null as any,
+  _shareImageCache: null as { url: string; path: string } | null,
   _cancelToken: null as any,
   _loginCancelToken: null as any,
   _qrCancelToken: null as any,
@@ -62,7 +63,7 @@ Page({
       (this as any)._cancelToken = null;
     }
     // 登录是写操作，不在 onHide 取消，避免系统调用触发 onHide 后登录中断。
-    // 图片下载是保存分享图写操作的一部分，不在 onHide 中止，避免系统调用返回后 _savingImage 卡住。
+    // 图片下载是保存分享图写操作的一部分，不在 onHide 中止，避免系统调用返回后 _savingImage 标志卡住。
     (this as any)._forceSetData({ loading: false });
     resetLoading();
   },
@@ -176,6 +177,17 @@ Page({
   },
 
   async _doSaveShareImage() {
+    // 防重入：连点会并行多次下载并多次弹出保存菜单。
+    if ((this as any)._savingImage) return;
+    (this as any)._savingImage = true;
+    try {
+      await this._doSaveShareImageInner();
+    } finally {
+      (this as any)._savingImage = false;
+    }
+  },
+
+  async _doSaveShareImageInner() {
     if (!this.data.shareImageUrl) {
       wx.showLoading({ title: (this as any).$t('invite.generating'), mask: true });
       try {
@@ -194,20 +206,35 @@ Page({
 
     wx.showLoading({ title: (this as any).$t('common.loading'), mask: true });
     try {
-      const download: any = await new Promise((resolve, reject) => {
-        (this as any)._downloadTask = wx.downloadFile({
-          url: imageUrl,
-          success: resolve,
-          fail: (err) => reject(new Error(err?.errMsg || (this as any).$t('invite.downloadFail'))),
+      let filePath = '';
+      const cache = (this as any)._shareImageCache;
+      if (cache && cache.url === imageUrl) {
+        filePath = await new Promise<string>((resolve) => {
+          wx.getFileSystemManager().access({
+            path: cache.path,
+            success: () => resolve(cache.path),
+            fail: () => resolve(''),
+          });
         });
-      });
-      (this as any)._downloadTask = null;
-      if ((this as any)._isDestroyed || (this as any)._isHidden) return;
-      if (download.statusCode !== 200) {
-        throw new Error(`${(this as any).$t('invite.downloadFail')}: ${download.statusCode}`);
       }
+      if (!filePath) {
+        const download: any = await new Promise((resolve, reject) => {
+          (this as any)._downloadTask = wx.downloadFile({
+            url: imageUrl,
+            success: resolve,
+            fail: (err) => reject(new Error(err?.errMsg || (this as any).$t('invite.downloadFail'))),
+          });
+        });
+        (this as any)._downloadTask = null;
+        if (download.statusCode !== 200) {
+          throw new Error(`${(this as any).$t('invite.downloadFail')}: ${download.statusCode}`);
+        }
+        filePath = download.tempFilePath;
+        (this as any)._shareImageCache = { url: imageUrl, path: filePath };
+      }
+      if ((this as any)._isDestroyed || (this as any)._isHidden) return;
       wx.showShareImageMenu({
-        path: download.tempFilePath,
+        path: filePath,
         needShowEntrance: true as any,
         entrancePath: `/pages/index/index?inviter=${encodeURIComponent(this.data.baseInfo?.userId || '')}`,
         fail: (err) => {

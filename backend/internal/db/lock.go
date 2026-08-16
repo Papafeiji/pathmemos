@@ -57,12 +57,17 @@ func (l *Lock) Unlock(ctx context.Context, key, token string) error {
 func (l *Lock) Extend(ctx context.Context, key, token string, ttl time.Duration) (bool, error) {
 	script := `
 		if redis.call("get", KEYS[1]) == ARGV[1] then
-			return redis.call("expire", KEYS[1], ARGV[2])
+			return redis.call("pexpire", KEYS[1], ARGV[2])
 		else
 			return 0
 		end
 	`
-	res, err := l.client.Eval(ctx, script, []string{key}, token, int64(ttl.Seconds())).Result()
+	// 毫秒精度并保底 1ms：ttl<1s 时 int64(ttl.Seconds())=0，Redis EXPIRE key 0 会直接删除锁。
+	ttlMS := ttl.Milliseconds()
+	if ttlMS < 1 {
+		ttlMS = 1
+	}
+	res, err := l.client.Eval(ctx, script, []string{key}, token, ttlMS).Result()
 	if err != nil {
 		return false, err
 	}
@@ -119,6 +124,13 @@ func (l *Lock) release(ctx context.Context, tokens map[string]string) error {
 // 仅用于临界区含外部 IO 或大批量处理、可能长于 TTL 的长任务锁；纯 DB 亚秒级临界区应选
 // ≤120s 的短 TTL 免除续期，不必调用本函数。必须 defer stop() 以停止续期任务并等待其退出。
 func (l *Lock) StartLockRenewal(ctx context.Context, tokens map[string]string, ttl time.Duration) (renewCtx context.Context, stop func()) {
+	if ttl <= 0 {
+		// 非法 TTL：续期任务无法有意义地运行，直接返回已取消的 ctx，
+		// 调用方按丢锁处理（与续期失败语义一致）。
+		ctx2, cancel := context.WithCancel(ctx)
+		cancel()
+		return ctx2, func() {}
+	}
 	renewCtx, cancel := context.WithCancel(ctx)
 	dones := make([]chan struct{}, 0, len(tokens))
 	for key, token := range tokens {
@@ -129,7 +141,12 @@ func (l *Lock) StartLockRenewal(ctx context.Context, tokens map[string]string, t
 		// done 在 fn 返回或 panic 展开时（defer）必定关闭，供 stop() 等待退出，无需额外裸 go 包装。
 		safe.GoWithRecover(renewCtx, slog.Default().With(slog.String("key", key)), func() error {
 			defer close(done)
-			ticker := time.NewTicker(ttl * 8 / 10)
+			// 续期间隔取 TTL 的 80%，并保底 1ms：ttl 极小时 ttl*8/10 截断为 0，NewTicker(0) 会 panic。
+			interval := ttl * 8 / 10
+			if interval < time.Millisecond {
+				interval = time.Millisecond
+			}
+			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
 				select {

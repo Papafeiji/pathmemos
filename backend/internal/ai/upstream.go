@@ -66,7 +66,8 @@ func (s *Stream) Next() (string, error) {
 		data := strings.TrimPrefix(line, sseDataPrefix)
 		data = strings.TrimSpace(data)
 		if data == "[DONE]" {
-			return "", nil
+			// R2-L02：以 io.EOF 显式标记流结束，与空 chunk（心跳）区分开。
+			return "", io.EOF
 		}
 		var payload struct {
 			Choices []struct {
@@ -103,7 +104,7 @@ func (s *Stream) Next() (string, error) {
 	if err := s.scan.Err(); err != nil {
 		return "", err
 	}
-	return "", nil
+	return "", io.EOF
 }
 
 func (s *Stream) Close() error {

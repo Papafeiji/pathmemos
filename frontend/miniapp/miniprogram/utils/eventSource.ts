@@ -35,10 +35,12 @@ interface EventSourceParams {
   onmessage?: (data: any) => void;
   onclose?: () => void;
   onerror?: (err: Error) => void;
+  // 网络类失败自动重连前回调：调用方借此清空半截输出，避免新流与旧内容拼接。
+  onreconnect?: () => void;
 }
 
 export function eventSource(params: EventSourceParams) {
-  const { url, method = 'POST', header = {}, data = {}, onopen, onmessage, onclose, onerror } = params;
+  const { url, method = 'POST', header = {}, data = {}, onopen, onmessage, onclose, onerror, onreconnect } = params;
   if (!url) {
     throw new Error(i18n.t('error.urlEmpty'));
   }
@@ -46,37 +48,11 @@ export function eventSource(params: EventSourceParams) {
   let aborted = false;
   let ended = false;
   let errorFired = false;
+  let reconnectAttempted = false;
   let buffer = '';
+  let requestTask: WechatMiniprogram.RequestTask;
   const decoder = new TextDecoder('utf-8');
   const MAX_BUFFER_SIZE = 64 * 1024; // 64KB，与服务端 SSE 消息体大小限制对齐
-
-  const requestTask = wx.request({
-    url,
-    method: method as WechatMiniprogram.RequestOption['method'],
-    data,
-    header,
-    enableChunked: true,
-    responseType: 'arraybuffer',
-    timeout: 200000,
-    success() {
-      if (aborted) return;
-      ended = true;
-      const tail = decoder.decode(new ArrayBuffer(0), { stream: false });
-      if (tail) {
-        buffer += tail;
-      }
-      if (buffer.trim()) processBuffer();
-      _safeCallback(onclose);
-      cleanupListeners();
-    },
-    fail(err: any) {
-      if (aborted) return;
-      logger.error('[eventSource] wx.request fail', err);
-      errorFired = true;
-      _safeCallback(onerror, new Error(err?.errMsg || i18n.t('error.networkFail')));
-      abort();
-    },
-  });
 
   const onHeadersReceived = (res: any) => {
     if (aborted) return;
@@ -102,14 +78,59 @@ export function eventSource(params: EventSourceParams) {
     processBuffer();
   };
 
-  requestTask.onHeadersReceived(onHeadersReceived);
-  requestTask.onChunkReceived(onChunkReceived);
+  function startRequest() {
+    requestTask = wx.request({
+      url,
+      method: method as WechatMiniprogram.RequestOption['method'],
+      data,
+      header,
+      enableChunked: true,
+      responseType: 'arraybuffer',
+      timeout: 200000,
+      success() {
+        if (aborted) return;
+        ended = true;
+        const tail = decoder.decode(new ArrayBuffer(0), { stream: false });
+        if (tail) {
+          buffer += tail;
+        }
+        if (buffer.trim()) processBuffer();
+        _safeCallback(onclose);
+        cleanupListeners();
+      },
+      fail(err: any) {
+        if (aborted) return;
+        // 网络类失败（断网/服务端断开/超时）做一次性自动重连：核心 AI 对话不应因
+        // 一次瞬时抖动就丢弃整流；业务错误（HTTP 非 200、SSE error 事件）仍直接终止。
+        if (!reconnectAttempted && !errorFired && !ended) {
+          reconnectAttempted = true;
+          buffer = '';
+          logger.warn('[eventSource] transport fail, auto reconnect once', err?.errMsg || err);
+          _safeCallback(onreconnect);
+          startRequest();
+          return;
+        }
+        logger.error('[eventSource] wx.request fail', err);
+        errorFired = true;
+        _safeCallback(onerror, new Error(err?.errMsg || i18n.t('error.networkFail')));
+        abort();
+      },
+    });
+    // R2-F09：低版本基础库可能无这两个回调 API，做存在性守卫防止崩溃。
+    requestTask.onHeadersReceived?.(onHeadersReceived);
+    requestTask.onChunkReceived?.(onChunkReceived);
+  }
+
+  startRequest();
 
   function processBuffer() {
-    let idx;
-    while ((idx = buffer.indexOf('\n\n')) !== -1) {
-      const raw = buffer.substring(0, idx).trim();
-      buffer = buffer.substring(idx + 2);
+
+    // R2-F08：兼容 CRLF 分隔（服务端若按规范输出 \r\n\r\n 也能正确切分）。
+    for (;;) {
+      const m = /(\r?\n){2}/.exec(buffer);
+      if (!m || m.index === undefined) break;
+      const raw = buffer.substring(0, m.index).trim();
+      buffer = buffer.substring(m.index + m[0].length);
       processMessage(raw);
     }
   }
@@ -157,8 +178,10 @@ export function eventSource(params: EventSourceParams) {
   }
 
   function cleanupListeners() {
-    requestTask.offHeadersReceived(onHeadersReceived);
-    requestTask.offChunkReceived(onChunkReceived);
+    // 与注册处（onHeadersReceived?./onChunkReceived?.）一致加存在性守卫：
+    // 低版本基础库无 off* 回调时直接调用会抛 TypeError，冒泡到页面 onUnload 等。
+    requestTask.offHeadersReceived?.(onHeadersReceived);
+    requestTask.offChunkReceived?.(onChunkReceived);
   }
 
   function abort() {

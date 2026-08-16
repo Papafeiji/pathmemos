@@ -9,9 +9,6 @@ module.exports = {
     browser: true,
     node: true,
   },
-  ecmaFeatures: {
-    modules: true,
-  },
   parser: '@typescript-eslint/parser',
   parserOptions: {
     ecmaVersion: 2020,

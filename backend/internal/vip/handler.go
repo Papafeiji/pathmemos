@@ -11,7 +11,6 @@ import (
 	"papafeiji/backend/pkg/errors"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/redis/go-redis/v9"
 )
 
 const maxVIPRequestBodySize = 8 << 10
@@ -19,15 +18,14 @@ const maxVIPRequestBodySize = 8 << 10
 type Handler struct {
 	router  chi.Router
 	pool    *db.Pool
-	rdb     *redis.Client
 	service *Service
 }
 
-func NewHandler(router chi.Router, pool *db.Pool, rdb *redis.Client, service *Service) *Handler {
+// NewHandler 创建 VIP 路由处理器（B6b-06：移除未使用的 rdb 参数——防重由 DB 唯一约束保证）。
+func NewHandler(router chi.Router, pool *db.Pool, service *Service) *Handler {
 	return &Handler{
 		router:  router,
 		pool:    pool,
-		rdb:     rdb,
 		service: service,
 	}
 }
@@ -99,8 +97,6 @@ func (h *Handler) ClaimFreeVIP(w http.ResponseWriter, r *http.Request) {
 		switch err {
 		case ErrFreeVIPAlreadyClaimed:
 			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizFreeVipAlreadyClaimed), errors.CodeBadRequest, err.Error(), errors.BizFreeVipAlreadyClaimed)
-		case ErrOperationInProgress:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
 		case ErrInvalidVIP:
 			middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, err.Error())
 		default:
@@ -141,8 +137,6 @@ func (h *Handler) ClaimTrialVIP(w http.ResponseWriter, r *http.Request) {
 		switch err {
 		case ErrTrialVIPAlreadyClaimed:
 			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizTrialVipAlreadyClaimed), errors.CodeBadRequest, err.Error(), errors.BizTrialVipAlreadyClaimed)
-		case ErrOperationInProgress:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
 		default:
 
 			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to claim trial vip")

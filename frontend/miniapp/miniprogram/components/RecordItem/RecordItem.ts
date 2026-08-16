@@ -115,7 +115,7 @@ Component({
       const currentUserId = this.properties.userId || '';
       return {
         ...data,
-        recordTime: data.recordTime.split(' ')[1]?.slice(0, -3) || '',
+        recordTime: data.recordTime.split(' ')[1]?.split(':').slice(0, 2).join(':') || '',
         showMore: _shouldShowMore(data.recordText || ''),
         images,
         showFamilyName: data.familyMemberUserId && data.familyMemberUserId !== currentUserId && !!data.familyMemberNickName,
@@ -193,6 +193,7 @@ Component({
 
     async onConfirmDialogConfirm() {
       if (!(this as any)._isAlive()) return;
+      // 按 FP076：记录删除为普通业务，不做函数级防重入锁。
       const id = this.data.info?.id;
       if (!id) return;
       (this as any)._deleting = true;

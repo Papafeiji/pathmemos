@@ -119,6 +119,10 @@ func run() error {
 		return fmt.Errorf("load sys config: %w", err)
 	}
 
+	// 开源版默认图片由 LoadSysConfig（sysconfig.go open 分支）基于 API_HOST 构造绝对 URL：
+	// 轨迹图标会传给腾讯静态地图（icon: 参数），相对路径外部服务无法抓取，
+	// 此处不再覆盖为相对路径。
+
 	lock := db.NewLock(rdb)
 	sysCfgLoader := config.NewSysConfigLoader(pool.Queries(), cfg)
 
@@ -152,7 +156,7 @@ func run() error {
 	httpRouter := chi.NewRouter()
 	httpRouter.Use(middleware.RequestID)
 	httpRouter.Use(mw.RecoveryMiddleware(logger))
-	httpRouter.Use(mw.LoggerMiddleware(logger, cfg.TrustedProxyCIDR))
+	httpRouter.Use(mw.LoggerMiddleware(logger))
 
 	healthLimiter := mw.NewIPRateLimiter(30, time.Minute, cfg.TrustedProxyCIDR)
 	httpRouter.With(healthLimiter.Handler).Get("/health", newHealthHandler(pool, rdb, &shuttingDown))
@@ -210,15 +214,16 @@ func run() error {
 		familyHandler := family.NewHandler(r, pool, rdb, lock, sysCfg.DefaultAvatarURL, vipService)
 		familyHandler.Register()
 
-		fileHandler := file.NewHandler(r, pool, bgPool, rdb, storage)
+		fileHandler := file.NewHandler(r, pool, bgPool, rdb, storage, cfg, vipService)
 		fileHandler.Register()
 		fileHandler.RegisterUpload(
 			func(next http.Handler) http.Handler {
-				return http.TimeoutHandler(next, 6*time.Minute, `{"code":"5000","msg":"upload timeout"}`)
+				// 5 分钟 < httpServer.WriteTimeout(310s)，确保超时 JSON 能返回客户端。
+				return http.TimeoutHandler(next, 5*time.Minute, `{"code":"5000","msg":"upload timeout"}`)
 			},
 		)
 
-		vipHandler := vip.NewHandler(r, pool, rdb, vipService)
+		vipHandler := vip.NewHandler(r, pool, vipService)
 		vipHandler.Register()
 
 		paymentHandler := payment.NewHandler(r, pool, cfg, vipService)
@@ -246,7 +251,7 @@ func run() error {
 	sseRouter := chi.NewRouter()
 	sseRouter.Use(middleware.RequestID)
 	sseRouter.Use(mw.RecoveryMiddleware(logger))
-	sseRouter.Use(mw.LoggerMiddleware(logger, cfg.TrustedProxyCIDR))
+	sseRouter.Use(mw.LoggerMiddleware(logger))
 	sseRouter.With(healthLimiter.Handler).Get("/health", newHealthHandler(pool, rdb, &shuttingDown))
 
 	// AI chat 成本最高的端点，加应用层 IP 限流作为防御纵深（主防护为日配额制）
@@ -288,9 +293,12 @@ func run() error {
 		},
 
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       0,
-		WriteTimeout:      0,
-		IdleTimeout:       60 * time.Second,
+		// 注意：ReadTimeout 必须保持 0——Go http.Server 在请求体读完后启动后台读，
+		// 读 deadline 到期会关闭连接，中断进行中的 SSE 流（AI 对话 >30s 即被掐断）。
+		// 慢发 body 的防护由 ReadHeaderTimeout 与上层限流承担。
+		ReadTimeout:  0,
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	var wg sync.WaitGroup
@@ -362,6 +370,9 @@ func newLogger(level string) *slog.Logger {
 }
 
 func newHealthHandler(pool *db.Pool, rdb *goredis.Client, shutdownFlag *atomic.Bool) http.HandlerFunc {
+	// R4：Redis 降级节流告警——外部轮询 /health 返回体不是可靠的告警通道，
+	// 由进程自己按每 5 分钟一条 ERROR 日志（alert=redis_down）接入现有日志监控。
+	var lastRedisAlertAt atomic.Int64
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
@@ -381,9 +392,24 @@ func newHealthHandler(pool *db.Pool, rdb *goredis.Client, shutdownFlag *atomic.B
 			code = http.StatusServiceUnavailable
 		}
 
+		// R3：Redis 故障不再判死容器。AI 链路对 Redis 抖动已 fail-open，
+		// 若健康检查仍 503 会被 watchdog 反复重启，雪上加霜。
+		// 降级为 200 + "degraded"，由日志/监控告警兜底；数据库故障仍判死。
 		if err := rdb.Ping(ctx).Err(); err != nil {
-			status["status"] = "error"
-			code = http.StatusServiceUnavailable
+			status["redis"] = "down"
+			if status["status"] == "ok" {
+				status["status"] = "degraded"
+			}
+			now := time.Now().Unix()
+			if now-lastRedisAlertAt.Load() >= 300 {
+				lastRedisAlertAt.Store(now)
+				slog.ErrorContext(ctx, "redis health degraded",
+					slog.String("alert", "redis_down"),
+					slog.Any("error", err))
+			}
+		} else {
+			status["redis"] = "up"
+			lastRedisAlertAt.Store(0)
 		}
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

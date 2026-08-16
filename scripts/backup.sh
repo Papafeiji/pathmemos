@@ -19,6 +19,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# KEEP 必须为正整数，防止负数/非数字破坏清理逻辑
+if ! [[ "$KEEP" =~ ^[0-9]+$ ]] || [[ "$KEEP" -lt 1 ]]; then
+  echo "--keep 必须为正整数，当前值: $KEEP" >&2
+  exit 1
+fi
+
 mkdir -p "$OUTPUT_DIR"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)

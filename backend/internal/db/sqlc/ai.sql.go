@@ -73,7 +73,8 @@ DELETE FROM ai_dialog_logs
 WHERE id IN (
     SELECT id FROM ai_dialog_logs
     WHERE created_at < now() - interval '90 days'
-    ORDER BY id ASC
+    -- R2-L04：按创建时间最旧优先删除，而非随机 UUID 顺序。
+    ORDER BY created_at ASC
     LIMIT $1::bigint
 )
 `
@@ -234,7 +235,7 @@ JOIN diaries d ON d.id = de.diary_id
 WHERE d.user_id = $1
   AND d.record_date >= $2::date
   AND d.record_date <= $3::date
-ORDER BY de.created_at DESC
+ORDER BY COALESCE(de.record_time, de.created_at) DESC
 LIMIT $4
 `
 
@@ -251,6 +252,7 @@ type ListDiaryEntriesByDateRangeRow struct {
 	Location  string             `json:"location"`
 }
 
+// 排序与展示列同源：record_time 被编辑后结果顺序仍与展示值一致。
 func (q *Queries) ListDiaryEntriesByDateRange(ctx context.Context, arg ListDiaryEntriesByDateRangeParams) ([]ListDiaryEntriesByDateRangeRow, error) {
 	rows, err := q.db.Query(ctx, listDiaryEntriesByDateRange,
 		arg.UserID,

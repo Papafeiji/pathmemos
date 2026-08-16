@@ -44,16 +44,33 @@ func summarizeUserCommonAddresses(ctx context.Context, pool *Pool, userID string
 	lons := make([]pgtype.Numeric, 0, len(top))
 	counts := make([]int32, 0, len(top))
 
+	// B2-12：一次批量查询全部地址的最新坐标，替代循环内 N+1。
+	coordNames := make([]string, 0, len(top))
+	for _, row := range top {
+		if row.Name.Valid && row.Name.String != "" {
+			coordNames = append(coordNames, row.Name.String)
+		}
+	}
+	coords, err := pool.Queries().ListLatestCoordinatesByAddresses(ctx, sqlc.ListLatestCoordinatesByAddressesParams{
+		CreatedBy: userID,
+		Column2:   coordNames,
+	})
+	if err != nil {
+		return fmt.Errorf("list latest coordinates: %w", err)
+	}
+	coordByAddress := make(map[string]sqlc.ListLatestCoordinatesByAddressesRow, len(coords))
+	for _, c := range coords {
+		coordByAddress[c.Name.String] = c
+	}
+
 	for _, row := range top {
 		if !row.Name.Valid || row.Name.String == "" {
 			continue
 		}
-		coord, err := pool.Queries().GetLatestCoordinateByAddress(ctx, sqlc.GetLatestCoordinateByAddressParams{
-			CreatedBy: userID,
-			Address:   row.Name,
-		})
-		if err != nil {
-			return fmt.Errorf("get latest coordinate for %q: %w", row.Name.String, err)
+		coord, ok := coordByAddress[row.Name.String]
+		if !ok {
+			// R2-L10：单条脏数据（无坐标记录）跳过而非整批失败，避免连坐其它地址。
+			continue
 		}
 		userIDs = append(userIDs, userID)
 		names = append(names, row.Name.String)

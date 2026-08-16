@@ -85,6 +85,18 @@ local absExpiry = tonumber(ARGV[4])
 if not expiry or expiry <= 0 or not absExpiry or absExpiry <= 0 then
     return redis.error_reply('ERR invalid expiry')
 end
+-- B1-11：登录时清理索引中已过期的 session（每次最多 50 个，避免长时间阻塞）。
+-- 同时按迭代数 i>50 截断：否则集合前 50 个成员都有效时会 smembers 全量物化 + 逐成员 exists，
+-- 阻塞 Redis 单线程、拖慢登录核心路径。
+local members = redis.call('smembers', userSessionsKey)
+local cleaned = 0
+for i, id in ipairs(members) do
+    if i > 50 or cleaned >= 50 then break end
+    if redis.call('exists', 'session:' .. id) == 0 then
+        redis.call('srem', userSessionsKey, id)
+        cleaned = cleaned + 1
+    end
+end
 redis.call('set', sessionKey, userID, 'ex', expiry)
 redis.call('set', sessionAbsKey, '1', 'ex', absExpiry)
 redis.call('sadd', userSessionsKey, sessionID)
@@ -168,6 +180,7 @@ func (s *SessionManager) Get(ctx context.Context, sessionID string) (string, err
 // Delete removes a single session.
 var deleteSessionScript = `
 local sessionKey = KEYS[1]
+local sessionAbsKey = KEYS[2]
 local sessionID = ARGV[1]
 local expiry = ARGV[2]
 local userID = redis.call('get', sessionKey)
@@ -177,6 +190,8 @@ end
 local userSessionsKey = 'sessions:user:' .. userID
 redis.call('srem', userSessionsKey, sessionID)
 redis.call('del', sessionKey)
+-- B6a-04：同步删除绝对过期索引 key，避免 session:abs:* 残留。
+redis.call('del', sessionAbsKey)
 if tonumber(expiry) and tonumber(expiry) > 0 then
     redis.call('expire', userSessionsKey, expiry)
 end
@@ -190,6 +205,8 @@ local userSessionsKey = KEYS[1]
 local sessionIDs = redis.call('smembers', userSessionsKey)
 for i, id in ipairs(sessionIDs) do
     redis.call('del', 'session:' .. id)
+    -- B6a-04：同步删除绝对过期索引 key。
+    redis.call('del', 'session:abs:' .. id)
 end
 redis.call('del', userSessionsKey)
 return #sessionIDs
@@ -200,7 +217,8 @@ func (s *SessionManager) Delete(ctx context.Context, sessionID string) error {
 		return nil
 	}
 	sessionKey := sessionKeyPrefix + sessionID
-	_, err := s.rdb.Eval(ctx, deleteSessionScript, []string{sessionKey}, sessionID, int64(sessionExpiry.Seconds())).Result()
+	sessionAbsKey := sessionAbsoluteKeyPrefix + sessionID
+	_, err := s.rdb.Eval(ctx, deleteSessionScript, []string{sessionKey, sessionAbsKey}, sessionID, int64(sessionExpiry.Seconds())).Result()
 	if err != nil {
 		return fmt.Errorf("delete session: %w", err)
 	}

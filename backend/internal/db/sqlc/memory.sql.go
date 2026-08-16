@@ -223,8 +223,8 @@ func (q *Queries) ListMemoriesByUserAndDate(ctx context.Context, arg ListMemorie
 }
 
 const updateMemory = `-- name: UpdateMemory :one
-UPDATE memories SET title = $1, content = $2, record_time = $3, record_date = $6
-WHERE id = $4 AND user_id = $5
+UPDATE memories SET title = $1, content = $2, record_time = $3, record_date = $4
+WHERE id = $5 AND user_id = $6
 RETURNING id, user_id, record_time, record_date, title, content, created_at
 `
 
@@ -232,19 +232,20 @@ type UpdateMemoryParams struct {
 	Title      string             `json:"title"`
 	Content    string             `json:"content"`
 	RecordTime pgtype.Timestamptz `json:"recordTime"`
+	RecordDate pgtype.Date        `json:"recordDate"`
 	ID         string             `json:"id"`
 	UserID     string             `json:"userId"`
-	RecordDate pgtype.Date        `json:"recordDate"`
 }
 
+// B2-08：参数按使用顺序连续编号，避免 $6 跳跃误导。
 func (q *Queries) UpdateMemory(ctx context.Context, arg UpdateMemoryParams) (Memory, error) {
 	row := q.db.QueryRow(ctx, updateMemory,
 		arg.Title,
 		arg.Content,
 		arg.RecordTime,
+		arg.RecordDate,
 		arg.ID,
 		arg.UserID,
-		arg.RecordDate,
 	)
 	var i Memory
 	err := row.Scan(

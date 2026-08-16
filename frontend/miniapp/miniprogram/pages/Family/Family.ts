@@ -33,7 +33,6 @@ Page({
   },
 
   _creatingInviteLink: false,
-  _isQuitting: false,
   _isDestroyed: false,
   _isHidden: false,
   _cancelToken: null as any,
@@ -69,7 +68,6 @@ Page({
     (this as any)._forceSetData({ 'confirmDialog.visible': false });
     (this as any)._isDestroyed = true;
     (this as any)._isHidden = true;
-    (this as any)._isQuitting = false;
     if ((this as any)._cancelToken) {
       try { (this as any)._cancelToken.cancel(); } catch {  }
       (this as any)._cancelToken = null;
@@ -127,7 +125,7 @@ Page({
     wx.showLoading({ title: (this as any).$t('family.loading'), mask: true });
     const cancelToken = (this as any)._cancelToken;
     try {
-      const { data } = await request.get('/family', { cancelToken }, false);
+      const { data } = await request.get('/family', { cancelToken }, true);
 
       const baseInfo = getBaseInfo();
       const familyInfo = data || {};
@@ -176,10 +174,8 @@ Page({
 
   async handlePendingInvite(linkId: string) {
     if ((this as any)._isDestroyed) return;
-    (this as any)._joining = true;
     const isLoginNow = await request.isLogin();
     if (!isLoginNow) {
-      (this as any)._joining = false;
       
       try {
         await request.login((this as any)._cancelToken);
@@ -222,7 +218,6 @@ Page({
       if (!(this as any)._isDestroyed && !(this as any)._isHidden && !aborted) {
         this.fetch().catch(() => {});
       }
-      (this as any)._joining = false;
     }
   },
 
@@ -272,7 +267,6 @@ Page({
   },
 
   async doQuitFamily(targetUserId: string, isSelf: boolean) {
-    (this as any)._isQuitting = true;
 
     wx.showLoading({ title: (this as any).$t('family.processing'), mask: true });
     try {
@@ -293,8 +287,6 @@ Page({
       if ((this as any)._isDestroyed || (this as any)._isHidden || (this as any)._isRequestAbortError(err)) return;
       wx.hideLoading();
       wx.showToast({ title: err?.data?.msg || (this as any).$t('family.actionFail'), icon: 'none' });
-    } finally {
-      (this as any)._isQuitting = false;
     }
   },
 

@@ -183,7 +183,10 @@ func (l *SysConfigLoader) Load(ctx context.Context) (*SysConfig, error) {
 		}
 		l.mu.RUnlock()
 
-		cfg, err := loadSysConfigRaw(ctx, l.q, l.cfg)
+		// 共享加载不绑定首个调用方的 ctx：客户端取消会放大为一批并发请求的失败。
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		cfg, err := loadSysConfigRaw(loadCtx, l.q, l.cfg)
 		if err != nil {
 			return nil, err
 		}

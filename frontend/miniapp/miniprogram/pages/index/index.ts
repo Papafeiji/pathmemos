@@ -1,10 +1,9 @@
 
-import dayjs from 'dayjs';
+import dayjs from '../../lib/dayjs';
 import request, { createCancelToken, resetLoading } from '../../utils/request';
 import { closeAutoRecord, openAutoRecord } from '../../utils/autoRecord';
 import { logger } from '../../utils/logger';
 import { setPendingInviter } from '../../utils/storage';
-import { i18n } from '../../utils/i18n';
 import type { CancelToken } from '../../utils/http';
 import themeBehavior from '../../behaviors/theme';
 import i18nBehavior from '../../behaviors/i18n';
@@ -53,8 +52,7 @@ Page({
     } as StatsData,
     openAutoRecorded: false,
     todayDay: '',
-    todayDateText: '',
-    weeklyProgress: 0,
+    refresherTriggered: false,
     _loadedOnce: false,
   },
 
@@ -98,6 +96,13 @@ Page({
       const { data } = await request.get('/invite/resolve', { params: { code: shortCode }, cancelToken: this._sceneCancelToken || undefined }, false);
       if (data?.userId) {
         setPendingInviter(data.userId);
+        // R4：登录已先于场景码解析完成时（极弱网 1.5s 竞态），补绑邀请人。
+        // 后端幂等：已有邀请人/注册超 7 天均静默成功，不会重复奖励。
+        if (request.isLogin()) {
+          request.post('/auth/inviter', { data: { inviter: data.userId } }, true).catch((e) => {
+            logger.warn('late bind inviter failed', e);
+          });
+        }
       }
     } catch (e: any) {
       if (e?.message === 'request:abort') return;
@@ -110,9 +115,17 @@ Page({
     (this as any)._isHidden = false;
     (this as any)._applyPendingSetData();
 
+    // 场景码解析与首屏并行：invite/resolve 弱网下最长 20s，串行等待会造成白屏。
+    // 最多等待 1.5s（覆盖绝大多数正常网络）；超时未完成则先渲染首屏，
+    // 极弱网下新用户登录可能在解析完成前发生、错过 inviter 归属（可接受，
+    // 邀请关系仍可通过家庭页邀请链接补建）。
     if ((this as any)._scenePromise) {
-      await (this as any)._scenePromise;
+      const scenePromise = (this as any)._scenePromise;
       (this as any)._scenePromise = null;
+      await Promise.race([
+        scenePromise,
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]);
     }
 
     // 登录是写操作，若 reload 或抽屉触发的登录仍在进行，不应取消正在进行的登录请求。
@@ -155,26 +168,29 @@ Page({
   _pollCoverForDate(this: any, recordDate: string, familyId: string) {
     const initialCover = this.data.list.find((c: DiaryCard) => c.recordDate === recordDate)?.coverImg || '';
     let polls = 0;
-    if (this._coverPollTimer) clearInterval(this._coverPollTimer);
-    this._coverPollTimer = setInterval(async () => {
+    if (this._coverPollTimer) clearTimeout(this._coverPollTimer);
+    // R2-F14：setTimeout 链式调度，本轮请求完成后（含 catch）再排下一轮，弱网不并发叠加。
+    const tick = async () => {
       if (++polls > 12 || this._isDestroyed || this._isHidden) {
-        clearInterval(this._coverPollTimer);
         this._coverPollTimer = null;
         return;
       }
       try {
-        const res: any = await request.get('/diary/cover-url', { params: { familyId, recordDate } }, true);
+        // R3：首页封面轮询属后台请求，偶发 401 不踢登录态。
+        const res: any = await request.get('/diary/cover-url', { params: { familyId, recordDate } }, true, true);
         const newCover = res?.data?.coverImg;
         if (newCover && newCover !== initialCover) {
           const idx = this.data.list.findIndex((c: DiaryCard) => c.recordDate === recordDate);
           if (idx >= 0) {
             this._safeSetData({ [`list[${idx}].coverImg`]: newCover });
           }
-          clearInterval(this._coverPollTimer);
           this._coverPollTimer = null;
+          return;
         }
       } catch { /* poll failure is tolerated */ }
-    }, 500);
+      this._coverPollTimer = setTimeout(tick, 500);
+    };
+    this._coverPollTimer = setTimeout(tick, 500);
   },
 
   onUnload() {
@@ -247,28 +263,13 @@ Page({
     resetLoading();
   },
 
-  updateTodayText(stats?: StatsData) {
+  updateTodayText(_stats?: StatsData) {
     const now = dayjs();
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const weekdays = [
-      i18n.t('noteDetail.weekday0'),
-      i18n.t('noteDetail.weekday1'),
-      i18n.t('noteDetail.weekday2'),
-      i18n.t('noteDetail.weekday3'),
-      i18n.t('noteDetail.weekday4'),
-      i18n.t('noteDetail.weekday5'),
-      i18n.t('noteDetail.weekday6'),
-    ];
-    const weeklyEntries = stats?.weeklyEntries ?? this.data.stats.weeklyEntries;
+    // 仅维护跨天检测所需的 todayDay；todayDateText/weeklyProgress 在 wxml 中无绑定（死状态数据），
+    // 已移除，避免无效 setData 流量与硬编码英文月份。
     const todayDay = now.format('DD');
-    const todayDateText = `${months[now.month()]} · ${weekdays[now.day()]}`;
-    const weeklyProgress = Math.min(100, Math.round((weeklyEntries / 7) * 100));
-    if (
-      this.data.todayDay !== todayDay ||
-      this.data.todayDateText !== todayDateText ||
-      this.data.weeklyProgress !== weeklyProgress
-    ) {
-      (this as any)._safeSetData({ todayDay, todayDateText, weeklyProgress });
+    if (this.data.todayDay !== todayDay) {
+      (this as any)._safeSetData({ todayDay });
     }
   },
 
@@ -303,6 +304,38 @@ Page({
       return false;
     } finally {
       (this as any)._reloading = false;
+    }
+  },
+
+  // 下拉刷新：在现有内容基础上原位替换第一页，避免清空列表造成空态闪烁；
+  // 与 reload() 的差异在于不清 list、不要求 finishedLoad，刷新失败时保留旧内容。
+  async handlePullRefresh() {
+    if ((this as any)._reloading || (this as any)._isHidden) {
+      (this as any)._safeSetData({ refresherTriggered: false });
+      return;
+    }
+    (this as any)._reloading = true;
+    (this as any)._safeSetData({ refresherTriggered: true });
+    let prevCursor = '';
+    let prevFinished = false;
+    try {
+      const isLogin = await this.ensureLogin((this as any)._loginCancelToken);
+      if (!isLogin || (this as any)._isDestroyed) return;
+      prevCursor = this.cursorDate;
+      prevFinished = this.finishedLoad;
+      this.cursorDate = '';
+      this.finishedLoad = false;
+      await this.fetch({ skipReloadGuard: true, replace: true });
+      if ((this as any)._isDestroyed || (this as any)._isHidden) return;
+      await this.fetchStats();
+    } catch (e) {
+      // 请求失败时恢复旧游标，避免下次 loadMore 从空游标重拉首页造成列表重复。
+      this.cursorDate = prevCursor;
+      this.finishedLoad = prevFinished;
+      logger.warn('index pull refresh failed', e);
+    } finally {
+      (this as any)._reloading = false;
+      (this as any)._safeSetData({ refresherTriggered: false });
     }
   },
 
@@ -362,7 +395,7 @@ Page({
     }
   },
 
-  async fetch(options?: { skipReloadGuard?: boolean }) {
+  async fetch(options?: { skipReloadGuard?: boolean; replace?: boolean }) {
     if (this.data.loading || this.finishedLoad || !this.data.isLogin || ((this as any)._reloading && !options?.skipReloadGuard) || (this as any)._isHidden) return;
 
     this._resetListCancelToken();
@@ -373,11 +406,21 @@ Page({
       if (this.cursorDate) {
         params.cursorDate = this.cursorDate;
       }
-      const { data, count, nextCursor } = await request.get('/diary/info', { params, cancelToken: cancelToken! });
+      const { data, count, nextCursor } = await request.get('/diary/info', { params, cancelToken: cancelToken! }, true);
       const mappedData = data || [];
 
       this.finishedLoad = !nextCursor;
       this.cursorDate = nextCursor || '';
+
+      if (options?.replace) {
+        // 下拉刷新：整体替换第一页（首屏至多 PAGE_SIZE 条，单次 setData 数组远小于阈值）。
+        (this as any)._safeSetData({
+          list: mappedData,
+          count: typeof count === 'number' ? count : 0,
+          loading: false,
+        });
+        return;
+      }
 
       const newList = this.data.list.concat(mappedData);
       if (newList.length > MAX_LIST_SIZE) {

@@ -76,10 +76,8 @@ const _applyLoginResult = async (data: any, cancelToken?: CancelToken) => {
     try {
       await claimNewUserFreeVip();
     } catch (err: any) {
-      const code = err?.data?.biz_code || '';
-      if (code !== 'TRIAL_VIP_ALREADY_CLAIMED') {
-        logger.error('新用户自动领取免费 VIP 失败', err);
-      }
+      // TRIAL_VIP_ALREADY_CLAIMED 已在 claimNewUserFreeVip 内部收敛为成功，此处不会收到该码。
+      logger.error('新用户自动领取免费 VIP 失败', err);
     }
   }
 
@@ -100,6 +98,8 @@ const _applyLoginResult = async (data: any, cancelToken?: CancelToken) => {
     return;
   }
   if (data.newUser) {
+    // FI57：claim 期间登录发起页可能已销毁/用户已跳走，跳转前补一次取消校验，避免强制重定向。
+    if (cancelToken?.isCancelled()) return;
     notifyLoginSuccess();
     wx.redirectTo({ url: '/pages/Guide/Guide' });
     return;

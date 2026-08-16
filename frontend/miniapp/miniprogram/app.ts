@@ -45,13 +45,22 @@ App<IAppOption>({
           if (loggedIn) {
             
             (this as any).globalData._needRefreshIndexList = true;
-            (this as any).globalData._lastAutoRecordRestoreTime = Date.now();
-            tryRestoreAutoRecord();
+            tryRestoreAutoRecord().then((ok) => {
+              // 恢复成功才进入 30 秒冷却；失败时保持时间戳为 0，
+              // 让紧随其后的 onShow 能立即重试。
+              if (ok) {
+                (this as any).globalData._lastAutoRecordRestoreTime = Date.now();
+              }
+            }).catch(() => {});
             request.put('/user/lang', { data: { lang: i18n.getLocale() } }).catch(() => {});
           }
         })
         .catch((err: any) => {
           logger.warn('启动登录或恢复自动记录失败', err);
+          // 登录失败（网络抖动/后端瞬时不可用）时也要尝试恢复自动记录：
+          // tryRestoreAutoRecord 内部会按需触发登录与退避重试，避免登录失败
+          // 直接阻断自动记录恢复，导致用户打开小程序后功能静默停摆。
+          tryRestoreAutoRecord().catch(() => {});
         });
     };
 
@@ -96,16 +105,21 @@ App<IAppOption>({
     }
   },
   onShow() {
-    const loggedIn = request.isLogin();
-    if (loggedIn) {
-      const app = this as any;
-      (async () => {
-        const lastRestoreTime = app.globalData._lastAutoRecordRestoreTime || 0;
-        const now = Date.now();
-        if (now - lastRestoreTime > 30000) {
-          app.globalData._lastAutoRecordRestoreTime = now;
-          await tryRestoreAutoRecord();
+    const app = this as any;
+    (async () => {
+      const lastRestoreTime = app.globalData._lastAutoRecordRestoreTime || 0;
+      const now = Date.now();
+      if (now - lastRestoreTime > 30000) {
+        // 未登录时也尝试恢复：tryRestoreAutoRecord 内部带登录与退避重试，
+        // 避免登录态丢失时（微信清理 storage/session 过期）自动记录静默停摆。
+        // 仅在恢复成功后才更新时间戳进入冷却；失败时保持 0，下次 onShow 立即重试。
+        const ok = await tryRestoreAutoRecord();
+        if (ok) {
+          app.globalData._lastAutoRecordRestoreTime = Date.now();
         }
+      }
+      // 恢复流程内部可能已完成登录：这里重新取值，避免"恢复期间登录"被跳过 onAppShow/VIP 刷新。
+      if (request.isLogin()) {
         onAppShow();
         const vipInfo = (request as any).getVipInfo?.();
         const needRefresh = !vipInfo || (Date.now() - (vipInfo._fetchTime || 0) > 5 * 60 * 1000);
@@ -114,8 +128,8 @@ App<IAppOption>({
             logger.error('onShow 刷新 VIP 信息失败', err);
           });
         }
-      })();
-    }
+      }
+    })();
   },
   onHide() {
     onAppHide();

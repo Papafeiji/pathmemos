@@ -1,6 +1,6 @@
-import dayjs from 'dayjs';
+import dayjs from '../../lib/dayjs';
 import { safeDayjs } from '../../utils/util';
-import request, { getErrorMessage, createCancelToken, resetLoading } from '../../utils/request';
+import request, { getErrorMessage, createCancelToken } from '../../utils/request';
 import i18nBehavior from '../../behaviors/i18n';
 import { i18n } from '../../utils/i18n';
 
@@ -103,7 +103,6 @@ Component({
         try { (this as any)._saveCancelToken.cancel(); } catch {}
         (this as any)._saveCancelToken = null;
       }
-      resetLoading();
     },
   },
 
@@ -115,7 +114,6 @@ Component({
         calendarVisible: false,
         timePickerVisible: false,
       });
-      resetLoading();
     },
   },
 
@@ -215,6 +213,7 @@ Component({
         return;
       }
 
+      // 按 FP072/FP076：记忆创建为普通业务，不做函数级防重入锁；重复提交由后端兜底。
       self._submitting = true;
       const isCreate = !!this.data.isCreate;
       try {

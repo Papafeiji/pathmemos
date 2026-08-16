@@ -117,21 +117,16 @@ JOIN diaries d ON d.id = de.diary_id
 WHERE d.user_id = ANY($1::text[])
   AND d.record_date >= $2::date;
 
--- name: DeleteDiaryAndEntriesReturningFileIDs :many
--- 在事务内先锁定日记行、再删除图片关联并返回 file_id，最后删除日记（级联删除条目）。
--- FOR UPDATE 阻止并发创建条目，确保返回的 file_id 与实际被级联删除的图片完全一致。
-WITH locked AS (
-    SELECT diaries.id FROM diaries WHERE diaries.id = $1 FOR UPDATE
-),
-deleted_images AS (
-    DELETE FROM diary_entry_images
-    WHERE diary_entry_id IN (SELECT diary_entries.id FROM diary_entries WHERE diary_entries.diary_id = $1)
-    RETURNING file_id
-),
-deleted_diary AS (
-    DELETE FROM diaries WHERE diaries.id = $1
-)
-SELECT DISTINCT file_id FROM deleted_images;
+-- name: DeleteDiaryImagesReturningFileIDs :many
+-- 先删图片关联并返回 file_id，再由调用方在同一事务内删除日记（级联删除条目）。
+-- 拆成两条语句：PostgreSQL 不保证同一 WITH 内多个数据修改 CTE 的执行顺序，
+-- 若级联（删日记）先于显式 DELETE...RETURNING 执行，file_id 会为空导致文件漏清理。
+DELETE FROM diary_entry_images
+WHERE diary_entry_id IN (SELECT id FROM diary_entries WHERE diary_id = $1)
+RETURNING file_id;
+
+-- name: DeleteDiaryByID :exec
+DELETE FROM diaries WHERE id = $1;
 
 -- name: FindTrajectoryCovers :many
 SELECT id, path, storage_type FROM files

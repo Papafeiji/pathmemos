@@ -15,11 +15,16 @@ import (
 	"papafeiji/backend/pkg/util"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 var (
 	ErrInvalidVIP = errors.New("invalid vip")
+	// errNotifyRejected 表示回调的业务性拒绝（订单不存在/金额不符/事件不支持等）：
+	// 重试无法改变结果，应回 200 终止微信重试（B6b-04）。
+	// 其余错误视为瞬时故障，回非 2xx 触发微信重试。
+	errNotifyRejected = errors.New("notify business rejected")
 )
 
 type requestResponse struct {
@@ -173,22 +178,22 @@ func (h *Handler) handleNotify(ctx context.Context, payload map[string]interface
 		transactionID = getStringAny(payload, "transaction_id")
 	}
 	if outTradeNo == "" {
-		return fmt.Errorf("missing out_trade_no")
+		return fmt.Errorf("%w: missing out_trade_no", errNotifyRejected)
 	}
 	if transactionID == "" {
 		slog.ErrorContext(ctx, "notify missing transaction_id", slog.String("out_trade_no", outTradeNo))
-		return fmt.Errorf("missing transaction_id")
+		return fmt.Errorf("%w: missing transaction_id", errNotifyRejected)
 	}
 
 	if evt := eventType(payload); evt != "xpay_goods_deliver_notify" {
-		return fmt.Errorf("unsupported payment event: %s", evt)
+		return fmt.Errorf("%w: unsupported payment event: %s", errNotifyRejected, evt)
 	}
 
 	order, err := h.pool.Queries().GetOrderByOutTradeNo(ctx, outTradeNo)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			slog.WarnContext(ctx, "notify order not found", slog.String("out_trade_no", outTradeNo))
-			return fmt.Errorf("order not found: %w", err)
+			return fmt.Errorf("%w: order not found: %v", errNotifyRejected, err)
 		}
 		return fmt.Errorf("get order by out trade no: %w", err)
 	}
@@ -206,14 +211,14 @@ func (h *Handler) handleNotify(ctx context.Context, payload map[string]interface
 		slog.ErrorContext(ctx, "notify amount missing or unparsable",
 			slog.String("out_trade_no", outTradeNo),
 			slog.Int64("order_amount", int64(order.Amount)))
-		return fmt.Errorf("amount missing")
+		return fmt.Errorf("%w: amount missing", errNotifyRejected)
 	}
 	if notifyAmount != int64(order.Amount) {
 		slog.ErrorContext(ctx, "notify amount mismatch",
 			slog.String("out_trade_no", outTradeNo),
 			slog.Int64("order_amount", int64(order.Amount)),
 			slog.Int64("notify_amount", notifyAmount))
-		return fmt.Errorf("amount mismatch")
+		return fmt.Errorf("%w: amount mismatch", errNotifyRejected)
 	}
 
 	err = db.WithTx(ctx, h.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
@@ -232,12 +237,36 @@ func (h *Handler) handleNotify(ctx context.Context, payload map[string]interface
 			TransactionID: pgtype.Text{String: transactionID, Valid: true},
 		})
 		if err != nil {
-			// transaction_id 唯一索引冲突（不同 out_trade_no 收到同一 transaction_id）
-			// 属于微信侧不应发生的异常场景；此处直接返回错误并记录，依赖监控告警人工兜底。
+			// 仅 transaction_id 唯一冲突（23505，不同 out_trade_no 收到同一 transaction_id）
+			// 属微信侧不应发生的异常，重试无法修复，按业务拒绝并依赖监控告警人工兜底。
+			// 其余错误（40001 序列化失败、40P01 死锁、连接中断等）为瞬时故障，原样返回以触发微信重试。
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return fmt.Errorf("%w: update order paid: %v", errNotifyRejected, err)
+			}
 			return fmt.Errorf("update order paid: %w", err)
 		}
 		if rows == 0 {
-			// 订单已非 pending（已支付或已关闭），DB 唯一约束 + WHERE state='pending' 已保证幂等。
+			// currentOrder 是事务开头的快照；rows==0 说明订单已非 pending，可能被并发 CloseOrder
+			// 在快照之后、本次 UPDATE 之前改为 closed（快照仍 pending）。重新读取最新状态，
+			// 避免把"刚被关闭但已支付"误判为幂等成功而静默漏发货。
+			freshOrder, ferr := q.GetOrderByOutTradeNo(ctx, outTradeNo)
+			if ferr == nil {
+				currentOrder = freshOrder
+			} else if !errors.Is(ferr, pgx.ErrNoRows) {
+				return fmt.Errorf("re-read order state: %w", ferr)
+			}
+			// 订单已非 pending：paid 为已发货的幂等重试，正常返回成功。
+			// closed 表示订单被关闭后才完成支付（取消竞态/后台任务关闭超时 pending 后仍支付成功），
+			// 微信已扣款但未发货：返回非 2xx 触发微信持续重试，并打 alert 供监控人工补发。
+			if currentOrder.State == "closed" && !isUserDeleted {
+				slog.ErrorContext(ctx, "payment notify for closed order: paid but not delivered",
+					slog.String("alert", "payment_notify_closed_order_unfulfilled"),
+					slog.String("out_trade_no", outTradeNo),
+					slog.String("vip_id", currentOrder.VipID),
+					slog.String("transaction_id", transactionID))
+				return fmt.Errorf("order closed before payment notify (paid but not delivered)")
+			}
 			slog.WarnContext(ctx, "notify for non-pending order", slog.String("out_trade_no", outTradeNo))
 			return nil
 		}

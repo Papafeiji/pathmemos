@@ -167,6 +167,7 @@ type User struct {
 	AbnormalAlertSentAt       pgtype.Timestamptz `json:"abnormalAlertSentAt"`
 	LastActiveAt              pgtype.Timestamptz `json:"lastActiveAt"`
 	Lang                      string             `json:"lang"`
+	ImageStorageBytes         int64              `json:"imageStorageBytes"`
 }
 
 type UserAvatarMarker struct {

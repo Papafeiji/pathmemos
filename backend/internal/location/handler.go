@@ -1,14 +1,10 @@
 package location
 
 import (
-	"context"
-	"fmt"
-
 	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
-	"time"
 
 	"papafeiji/backend/internal/config"
 	"papafeiji/backend/internal/middleware"
@@ -17,25 +13,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/redis/go-redis/v9"
 )
-
-const (
-	maxReversePerUserPerDay = 200
-	reverseQuotaKeyPrefix   = "location:reverse"
-	reverseQuotaTTL         = 24 * time.Hour
-)
-
-// checkReverseQuotaScript atomically increments the per-user daily counter and
-// sets its TTL on the first increment. Returns 1 if the request is within quota.
-var checkReverseQuotaScript = `
-local key = KEYS[1]
-local ttl = tonumber(ARGV[1])
-local maxCount = tonumber(ARGV[2])
-local cur = redis.call('incr', key)
-if cur == 1 then
-    redis.call('expire', key, ttl)
-end
-return cur <= maxCount and 1 or 0
-`
 
 type Handler struct {
 	router         chi.Router
@@ -73,7 +50,7 @@ func (h *Handler) Reverse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.checkReverseQuota(ctx, userID) {
+	if !CheckReverseQuota(ctx, h.rdb, userID) {
 		middleware.JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "daily reverse geocode quota exceeded")
 		return
 	}
@@ -99,24 +76,6 @@ func (h *Handler) Reverse(w http.ResponseWriter, r *http.Request) {
 		"pois":          res.POIs,
 	}
 	middleware.JSON(w, r, http.StatusOK, resp)
-}
-
-func (h *Handler) checkReverseQuota(ctx context.Context, userID string) bool {
-	if h.rdb == nil {
-		slog.ErrorContext(ctx, "reverse geocode quota check failed: redis not available")
-		return false
-	}
-	key := fmt.Sprintf("%s:%s:%s", reverseQuotaKeyPrefix, userID, time.Now().UTC().Format("2006-01-02"))
-	allowed, err := h.rdb.Eval(ctx, checkReverseQuotaScript,
-		[]string{key},
-		int64(reverseQuotaTTL.Seconds()),
-		maxReversePerUserPerDay,
-	).Int()
-	if err != nil {
-		slog.ErrorContext(ctx, "reverse geocode quota check failed", slog.Any("error", err))
-		return false
-	}
-	return allowed == 1
 }
 
 func roundHalfUp(v float64, places int) float64 {

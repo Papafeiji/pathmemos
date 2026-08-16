@@ -2,7 +2,8 @@
   "usingComponents": {
     "navigation-bar": "/components/navigation-bar/navigation-bar",
     "Cell": "/components/Cell/Cell",
-    "Drawer": "/components/Drawer/Drawer"
+    "Drawer": "/components/Drawer/Drawer",
+    "ConfirmDialog": "/components/ConfirmDialog/ConfirmDialog"
   },
   "renderer": "webview"
 }

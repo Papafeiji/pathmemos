@@ -18,11 +18,14 @@ WHERE out_trade_no = $1 AND state = 'pending';
 UPDATE orders SET state = 'closed', updated_at = now() WHERE out_trade_no = $1 AND state = 'pending' AND user_id = $2;
 
 -- name: CloseOrdersBatch :execrows
-UPDATE orders
+-- 两个数组按位置配对（B2-10）：out_trade_nos 展开为 (订单号, 序号)，
+-- user_ids 按下标取同位置的 user_id，避免双 ANY 独立展开产生笛卡尔误关他人订单。
+UPDATE orders AS o
 SET state = 'closed', updated_at = now()
-WHERE out_trade_no = ANY(sqlc.arg(out_trade_nos)::text[])
-  AND user_id = ANY(sqlc.arg(user_ids)::text[])
-  AND state = 'pending';
+FROM unnest(sqlc.arg(out_trade_nos)::text[]) WITH ORDINALITY AS t(no, ord)
+WHERE o.out_trade_no = t.no
+  AND o.user_id = (sqlc.arg(user_ids)::text[])[t.ord]
+  AND o.state = 'pending';
 
 -- name: ClosePendingOrdersByUser :exec
 UPDATE orders SET state = 'closed', updated_at = now()

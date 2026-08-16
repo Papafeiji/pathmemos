@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -62,8 +63,9 @@ func (l *slidingWindowLimiter) allow(key string) bool {
 	}
 	b.requests = append(b.requests, now)
 
-	// 惰性清理过期桶，防止 map 无限增长。
-	if len(l.buckets) >= l.maxBuckets {
+	// 惰性清理过期桶：仅在桶数超限 20% 时触发（而非每请求满容量时全表扫描），
+	// 每轮最多删除 maxEvictPerPass 个，避免攻击场景下 O(N) 扫描拖垮所有限流检查。
+	if len(l.buckets) >= l.maxBuckets*12/10 {
 		l.evictBuckets(cutoff)
 	}
 
@@ -71,28 +73,24 @@ func (l *slidingWindowLimiter) allow(key string) bool {
 }
 
 func (l *slidingWindowLimiter) evictBuckets(cutoff time.Time) {
+	// R2-03：单次遍历完成淘汰——删除全部过期/空桶并顺带记录最久未活跃桶；
+	// 仍超限时仅删该一个最旧桶。避免原先最坏 O(100×N) 的内层全表扫描。
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
 	for k, b := range l.buckets {
 		if len(b.requests) == 0 || b.requests[len(b.requests)-1].Before(cutoff) {
 			delete(l.buckets, k)
+			continue
+		}
+		if first || b.requests[0].Before(oldestTime) {
+			oldestKey = k
+			oldestTime = b.requests[0]
+			first = false
 		}
 	}
-	if len(l.buckets) >= l.maxBuckets {
-		// 淘汰最久未使用的桶，避免在高并发时误杀新的合法来源。
-		var oldestKey string
-		var oldestTime time.Time
-		for k, b := range l.buckets {
-			if len(b.requests) == 0 {
-				delete(l.buckets, k)
-				continue
-			}
-			if oldestKey == "" || b.requests[0].Before(oldestTime) {
-				oldestKey = k
-				oldestTime = b.requests[0]
-			}
-		}
-		if oldestKey != "" {
-			delete(l.buckets, oldestKey)
-		}
+	if len(l.buckets) > l.maxBuckets && !first {
+		delete(l.buckets, oldestKey)
 	}
 }
 
@@ -104,7 +102,11 @@ type IPRateLimiter struct {
 }
 
 func NewIPRateLimiter(limit int, window time.Duration, trustedProxies ...string) *IPRateLimiter {
-	parsed, _ := parseTrustedProxies(trustedProxies)
+	parsed, invalid := parseTrustedProxies(trustedProxies)
+	if len(invalid) > 0 {
+		// R2-L11：非法 CIDR 显式告警，避免配置错误时静默退化为直接信任 RemoteAddr。
+		slog.Warn("ip rate limiter: invalid trusted proxy cidr ignored", slog.Any("invalid", invalid))
+	}
 
 	return &IPRateLimiter{
 		sw:             newSlidingWindowLimiter(limit, window, defaultMaxBuckets),

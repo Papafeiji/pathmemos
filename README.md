@@ -1,11 +1,24 @@
 # PathMemos Open 部署指南
 
+## 前置条件
+
+- 一台能运行 Docker 的服务器（本地电脑、VPS、NAS 均可）
+- 一个 Cloudflare 账号（免费，用于创建 Tunnel 提供 HTTPS 入口）
+- 一个 DeepSeek / OpenAI 等 AI 服务的 API Key
+- 一个腾讯地图 Key
+
 ## 快速开始（推荐）
 
 在一台空服务器上，一行命令完成全部部署：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Papafeiji/pathmemos/open/scripts/install.sh | bash
+```
+
+国内用户可选 Gitee 镜像：
+
+```bash
+PATHMEMOS_MIRROR=gitee bash -c "$(curl -fsSL https://gitee.com/wowproton/path-memos/raw/open/scripts/install.sh)"
 ```
 
 **前置准备：**
@@ -20,6 +33,7 @@ Cloudflare API Token 需要以下权限：
 
 - `Account: Cloudflare Tunnel: Edit`
 - `Account: Account: Read`
+- `Zone: Zone: Read`（脚本自动列出你的域名供选择）
 - `Zone: DNS: Edit`（脚本会自动为自定义域名添加 CNAME 记录）
 
 脚本会自动完成：检查环境 → 安装 Docker → 下载代码 → 运行交互式部署 → 自动创建 Tunnel → 启动公网入口 → 健康检查。
@@ -62,20 +76,21 @@ cd pathmemos
 
 可选项：
 
-- `AI_BASE_URL` / `AI_MODEL`：AI 服务配置
+- `AI_PROVIDER` / `AI_BASE_URL` / `AI_MODEL`：AI 服务配置
 - `OPEN_API_KEY`：后端 API Key（`init.sh` 自动生成），在小程序「开源版本」页面填写此 Key 即可切换后端
 - `CLOUDFLARE_TUNNEL_TOKEN`：Cloudflare Tunnel token（`install.sh` / `expose.sh` 自动写入）
 - `API_HOST`：后端公网地址（`install.sh` / `expose.sh` 自动写入）
+- `WORKER_SECRET`：Cloudflare Worker 共享密钥（可选）
 - `TRUSTED_PROXY_CIDR`：可信代理 CIDR（`init.sh` 默认写入 172.16.0.0/12、10.0.0.0/8、192.168.0.0/16、127.0.0.0/8 私网段）
 - `NGINX_HTTP_PORT`：nginx 宿主机 HTTP 端口（默认 `80`；使用 Caddy HTTPS 时需改为 `8080` 等避免冲突）
 
-## 功能说明
+## 功能与限制说明
 
-1. **微信支付不可用。** 小程序内付费入口已隐藏，**免费 VIP 仍可领取**。
-2. **公众号消息不可用。**
+1. **微信支付不可用。** 回调指向 SaaS 官方，开源版无法自动开通会员，小程序内付费入口已隐藏，**免费 VIP 仍可领取**。
+2. **公众号消息不可用。** 微信回调 URL 唯一且指向 SaaS，开源版保留代码但无法接收消息。
 3. **MCP 接入**：部署后即可使用 `https://<你的后端>/mcp` 连接 MCP 客户端。
-4. **数据独立**：切换后端地址后数据独立，与原数据互不相通。
-5. **文件存储**：保存在服务器本地磁盘。
+4. **数据独立**：切换后端地址后数据独立，与原数据互不相通，SaaS 数据不会自动迁移。
+5. **文件存储**：保存在服务器本地磁盘，与 SaaS 的 OSS 不互通。
 
 ## 使用自有域名和证书（可选）
 
@@ -113,8 +128,8 @@ docker compose --profile https up -d caddy
 
 ### Quick Tunnel（trycloudflare.com）和 Named Tunnel 怎么选？
 
-- **Quick Tunnel**（安装时选「临时测试」）：零配置、无需 Cloudflare 账号，SSE/AI 对话可用；但**服务器或隧道进程重启后地址会变化**，需重跑安装脚本并在小程序中更新后端地址，仅适合测试。
-- **Named Tunnel**（安装时选自定义域名）：需要 Cloudflare API Token，地址永久固定，适合长期使用。
+- **Quick Tunnel**（安装时选「零域名临时隧道」）：零配置、无需 Cloudflare 账号，SSE/AI 对话可用；但**服务器或隧道进程重启后地址会变化**，需重跑安装脚本并在小程序中更新后端地址，仅适合测试。
+- **Named Tunnel**（安装时选「自定义域名」）：需要 Cloudflare API Token，地址永久固定，适合长期使用。
 
 测试跑通后建议切换到 Named Tunnel。
 

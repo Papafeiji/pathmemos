@@ -12,14 +12,15 @@ import (
 )
 
 func NewPool(databaseURL string) (*pgxpool.Pool, error) {
-	return newPoolWithTimeout(databaseURL, true)
+	return newPoolWithTimeout(databaseURL, true, 10)
 }
 
 func NewBackgroundPool(databaseURL string) (*pgxpool.Pool, error) {
-	return newPoolWithTimeout(databaseURL, false)
+	// B2-19：后台任务池只需少量常驻连接，MinConns 从 10 降到 2，避免浪费数据库连接。
+	return newPoolWithTimeout(databaseURL, false, 2)
 }
 
-func newPoolWithTimeout(databaseURL string, enableStatementTimeout bool) (*pgxpool.Pool, error) {
+func newPoolWithTimeout(databaseURL string, enableStatementTimeout bool, defaultMinConns int32) (*pgxpool.Pool, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("database URL is empty")
 	}
@@ -37,7 +38,7 @@ func newPoolWithTimeout(databaseURL string, enableStatementTimeout bool) (*pgxpo
 	}
 	config.MaxConns = maxConns
 
-	minConns := int32(10)
+	minConns := defaultMinConns
 	if v := os.Getenv("DB_MIN_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			minConns = int32(n)

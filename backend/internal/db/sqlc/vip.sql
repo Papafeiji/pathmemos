@@ -18,7 +18,8 @@ INSERT INTO user_vips (id, user_id, begin_time, expire_time, created_at)
 VALUES ($1, $2, $3, $4, now())
 ON CONFLICT (user_id) DO UPDATE SET
     begin_time = EXCLUDED.begin_time,
-    expire_time = EXCLUDED.expire_time
+    -- GREATEST 防止并发/重复下发时缩短已购 VIP 时长（B2-11）
+    expire_time = GREATEST(user_vips.expire_time, EXCLUDED.expire_time)
 RETURNING *;
 
 -- name: GetUserVIP :one
@@ -26,6 +27,14 @@ SELECT * FROM user_vips WHERE user_id = $1;
 
 -- name: GetUserVIPForUpdate :one
 SELECT * FROM user_vips WHERE user_id = $1 FOR UPDATE;
+
+-- name: ClaimUserVIPRow :exec
+-- 并发首次激活竞态防护：GetUserVIPForUpdate 对不存在的行无法加锁，两个并发首次激活
+-- 都走 ErrNoRows 创建路径会各自按 now 计算 expire、GREATEST 只保留较大者导致较小档时长丢失。
+-- 先 ON CONFLICT DO NOTHING 占位（expire=now），再 FOR UPDATE 重读串行化首次创建。
+INSERT INTO user_vips (id, user_id, begin_time, expire_time, created_at)
+VALUES ($1, $2, $3, $4, now())
+ON CONFLICT (user_id) DO NOTHING;
 
 -- name: DeleteUserVIP :exec
 DELETE FROM user_vips WHERE user_id = $1;

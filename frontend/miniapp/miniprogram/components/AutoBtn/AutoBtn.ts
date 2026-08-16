@@ -111,10 +111,10 @@ Component({
         });
       } else {
         wx.showModal({
-          title: '开启自动记录',
-          content: '开启后将在后台自动记录你的停留地点',
-          cancelText: '取消',
-          confirmText: '开启',
+          title: (this as any).$t('autoBtn.openTitle'),
+          content: (this as any).$t('autoBtn.openDesc'),
+          cancelText: (this as any).$t('common.cancel'),
+          confirmText: (this as any).$t('autoBtn.openAction'),
           success: (res) => {
             if (res.confirm) {
               openAutoRecord()
@@ -136,7 +136,15 @@ Component({
                     finish();
                     return;
                   }
-                  wx.showToast({ title: (this as any).$t('autoBtn.openFail'), icon: 'none' });
+                  if (err?.needRefresh) {
+                    wx.showModal({
+                      title: (this as any).$t('autoBtn.locationUnavailableTitle'),
+                      content: (this as any).$t('autoBtn.locationUnavailableDesc'),
+                      showCancel: false,
+                    });
+                  } else {
+                    wx.showToast({ title: (this as any).$t('autoBtn.openFail'), icon: 'none' });
+                  }
                   finish();
                 });
             } else {

@@ -146,7 +146,7 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		case ErrNotInNormalFamily, ErrNotOwner:
 			middleware.JSONError(w, r, http.StatusForbidden, errors.CodeForbidden, err.Error())
 		case ErrTargetNotInFamily:
-			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeBadRequest, err.Error())
+			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeNotFound, err.Error())
 		case ErrOperationInProgress:
 			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
 		default:
@@ -190,7 +190,7 @@ func (h *Handler) CreateInviteLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if info.FamilyID == "" {
-		middleware.JSONError(w, r, http.StatusNotFound, errors.CodeBadRequest, "family not found")
+		middleware.JSONError(w, r, http.StatusNotFound, errors.CodeNotFound, "family not found")
 		return
 	}
 

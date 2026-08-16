@@ -105,11 +105,18 @@ export const getPrivateBackendApiKey = (): string => {
 const PENDING_LINK_KEY = 'pendingLinkId';
 
 
+const PENDING_LINK_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+
 export const getPendingLinkId = (): string | null => {
   try {
     const raw = wx.getStorageSync(PENDING_LINK_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
+    // 校验有效期：残留的旧 linkId 会让每次进入家庭页都自动发起已失效的邀请请求。
+    if (parsed.ts && Date.now() - parsed.ts > PENDING_LINK_MAX_AGE_MS) {
+      try { wx.removeStorageSync(PENDING_LINK_KEY); } catch {}
+      return null;
+    }
     return parsed.value || null;
   } catch {
     try { wx.removeStorageSync(PENDING_LINK_KEY); } catch {}

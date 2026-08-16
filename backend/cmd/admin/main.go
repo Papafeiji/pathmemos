@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"papafeiji/backend/internal/config"
 	"papafeiji/backend/internal/db"
 	"papafeiji/backend/internal/family"
 	"papafeiji/backend/internal/file"
@@ -55,7 +56,9 @@ func main() {
 	sessions := mw.NewSessionManager(rdb)
 	familyService := family.NewService(pool, rdb, lock, "")
 
-	storage := file.NewStorage("").WithBaseURL(strings.TrimSuffix(os.Getenv("OSS_PUBLIC_URL"), "/"))
+	// 与 server main.go 一致：本地存储路径读 STORAGE_LOCAL_PATH（生产为 /opt/papafeiji/uploads），
+	// 否则 NewStorage("") 回落 DefaultUploadDir(/opt/pathmemos/uploads) 会导致删除用户时物理文件残留。
+	storage := file.NewStorage(os.Getenv("STORAGE_LOCAL_PATH")).WithBaseURL(strings.TrimSuffix(os.Getenv("OSS_PUBLIC_URL"), "/"))
 	if os.Getenv("OSS_ACCESS_KEY_ID") != "" && os.Getenv("OSS_ACCESS_KEY_SECRET") != "" &&
 		os.Getenv("OSS_ENDPOINT") != "" && os.Getenv("OSS_BUCKET") != "" {
 		ossClient, err := oss.New(
@@ -66,6 +69,8 @@ func main() {
 		if err != nil {
 			log.Fatalf("init oss client: %v", err)
 		}
+		// 与 server 端一致：OSS 删除/上传走带超时的 HTTP 客户端，避免运维工具无限挂起。
+		ossClient.HTTPClient = config.HTTPClient()
 		ossBucket, err := ossClient.Bucket(os.Getenv("OSS_BUCKET"))
 		if err != nil {
 			log.Fatalf("init oss bucket: %v", err)
@@ -101,12 +106,14 @@ func main() {
 
 	fmt.Printf("delete account succeeded, affected=%d, files=%d, family=%s\n", len(cleanup.AffectedUserIDs), len(cleanup.Paths), cleanup.FamilyID)
 
-	user.CleanupAfterAccountDeletion(ctx, pool, nil, sessions, storage, cleanup, userID)
+	// 同步清理给 2 分钟上限：OSS 删除卡住时运维工具不应无限挂起。
+	cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	user.CleanupAfterAccountDeletion(cleanupCtx, pool, nil, sessions, storage, cleanup, userID)
 
-	if cleanup.MarkerPath != "" && !strings.Contains(cleanup.MarkerPath, "default-marker") {
+	if cleanup.MarkerDeletable() {
 		fmt.Printf("deleted avatar marker %s\n", cleanup.MarkerPath)
 	}
 
 	fmt.Println("done")
-	time.Sleep(100 * time.Millisecond)
 }
