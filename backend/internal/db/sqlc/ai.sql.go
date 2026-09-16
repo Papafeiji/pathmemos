@@ -42,32 +42,6 @@ func (q *Queries) DeleteAIDailyQuotaUsageByUserID(ctx context.Context, userID st
 	return err
 }
 
-const deleteExcessDialogLogs = `-- name: DeleteExcessDialogLogs :execrows
-WITH to_delete AS (
-    SELECT id FROM ai_dialog_logs
-    WHERE ai_dialog_logs.user_id = $1
-    ORDER BY ai_dialog_logs.created_at ASC
-    OFFSET $2
-    LIMIT $3::bigint
-)
-DELETE FROM ai_dialog_logs
-WHERE ai_dialog_logs.id IN (SELECT id FROM to_delete)
-`
-
-type DeleteExcessDialogLogsParams struct {
-	UserID      string `json:"userId"`
-	OffsetCount int32  `json:"offsetCount"`
-	BatchSize   int64  `json:"batchSize"`
-}
-
-func (q *Queries) DeleteExcessDialogLogs(ctx context.Context, arg DeleteExcessDialogLogsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteExcessDialogLogs, arg.UserID, arg.OffsetCount, arg.BatchSize)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const deleteOldDialogLogs = `-- name: DeleteOldDialogLogs :execrows
 DELETE FROM ai_dialog_logs
 WHERE id IN (
@@ -310,39 +284,6 @@ func (q *Queries) ListRecentDialogLogs(ctx context.Context, arg ListRecentDialog
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listUsersWithExcessDialogLogs = `-- name: ListUsersWithExcessDialogLogs :many
-SELECT user_id FROM ai_dialog_logs
-GROUP BY user_id
-HAVING COUNT(*) > $1::bigint
-ORDER BY user_id
-LIMIT $2::bigint
-`
-
-type ListUsersWithExcessDialogLogsParams struct {
-	MinCount  int64 `json:"minCount"`
-	BatchSize int64 `json:"batchSize"`
-}
-
-func (q *Queries) ListUsersWithExcessDialogLogs(ctx context.Context, arg ListUsersWithExcessDialogLogsParams) ([]string, error) {
-	rows, err := q.db.Query(ctx, listUsersWithExcessDialogLogs, arg.MinCount, arg.BatchSize)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []string{}
-	for rows.Next() {
-		var user_id string
-		if err := rows.Scan(&user_id); err != nil {
-			return nil, err
-		}
-		items = append(items, user_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

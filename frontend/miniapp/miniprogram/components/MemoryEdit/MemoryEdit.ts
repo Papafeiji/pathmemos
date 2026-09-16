@@ -214,7 +214,6 @@ Component({
       }
 
       // 按 FP072/FP076：记忆创建为普通业务，不做函数级防重入锁；重复提交由后端兜底。
-      self._submitting = true;
       const isCreate = !!this.data.isCreate;
       try {
         if (self._saveCancelToken) {
@@ -257,7 +256,6 @@ Component({
         }
       } finally {
         self._saveCancelToken = null;
-        self._submitting = false;
       }
     },
   },

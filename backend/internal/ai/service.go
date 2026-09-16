@@ -66,9 +66,8 @@ const (
 	aiTurnKeyTTL = 240 * time.Second
 	// aiReplyTTL 完整回复的缓存时间：覆盖小程序断线自动重连（秒级）与弱网重试场景。
 	aiReplyTTL = 10 * time.Minute
-	// aiTurnWaitTimeout 重连请求等待「同一轮消息在途处理」的最长时间。
-	aiTurnWaitTimeout = 10 * time.Second
 	// aiTurnPollInterval 等待在途请求期间的轮询间隔。
+	// （重连等待窗口已对齐 aiTurnKeyTTL，见 Chat 内重连幂等分支，不再使用独立短超时）
 	aiTurnPollInterval = 200 * time.Millisecond
 	// aiReplayChunkRunes 回放缓存回复时的分片大小（按字符数），保持流式体验。
 	aiReplayChunkRunes = 120
@@ -109,16 +108,8 @@ func streamReplay(reply string, onChunk func(string) error) error {
 // dailyQuotaCacheTTLFor 返回指定日期对应的 Redis 缓存 TTL：到次日 0 点上海时区的剩余时间 + 60 秒缓冲。
 // 保证配额缓存按自然日过期，避免 24 小时固定 TTL 导致的跨天计数偏差。
 func dailyQuotaCacheTTLFor(t time.Time) time.Duration {
-	loc := t.Location()
-	if loc == nil {
-		loc = timeutil.Shanghai
-	}
-	tz := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc).Add(24 * time.Hour)
-	ttl := tz.Sub(t) + 60*time.Second
-	if ttl <= 0 {
-		return 60 * time.Second
-	}
-	return ttl
+	tz := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()).Add(24 * time.Hour)
+	return tz.Sub(t) + 60*time.Second
 }
 
 // Service holds AI chat business logic independent of transport (SSE / WeChat MP / etc.).
@@ -159,15 +150,6 @@ func (s *Service) Chat(ctx context.Context, userID, message, requestID string, o
 	return s.chatWithPrompt(ctx, userID, message, onChunk, sysCfg.AIPrompt, sysCfg, requestID)
 }
 
-// ChatWithPrompt runs a complete AI chat turn with a custom system prompt. An empty systemPrompt falls back to the default prompt.
-func (s *Service) ChatWithPrompt(ctx context.Context, userID, message string, onChunk func(string) error, systemPrompt string) (string, error) {
-	sysCfg, err := s.sysCfg(ctx)
-	if err != nil {
-		return "", fmt.Errorf("load sys config: %w", err)
-	}
-	return s.ChatWithPromptUsingConfig(ctx, userID, message, onChunk, systemPrompt, sysCfg)
-}
-
 // ChatWithPromptUsingConfig runs ChatWithPrompt using an already loaded config to avoid duplicate DB loads.
 func (s *Service) ChatWithPromptUsingConfig(ctx context.Context, userID, message string, onChunk func(string) error, systemPrompt string, sysCfg *config.SysConfig) (string, error) {
 	if systemPrompt == "" {
@@ -205,7 +187,11 @@ func (s *Service) chatWithPrompt(ctx context.Context, userID, message string, on
 		if ok, sErr := s.rdb.SetNX(ctx, turnKey, "1", aiTurnKeyTTL).Result(); sErr == nil && ok {
 			acquired = true
 		} else if sErr == nil && !ok {
-			deadline := time.Now().Add(aiTurnWaitTimeout)
+			// 在途请求可能流式生成最长 AIStreamTimeout(180s)；等待窗口对齐 turnKey TTL(240s)：
+			// 在途完成写 replyKey 即回放。R2：等待超时或在途失败绝不回落生成——
+			// 否则同一 request_id 会二次调用上游、二次扣配额、二次落库；统一返回
+			// OPERATION_IN_PROGRESS，由客户端稍后重试（残留标记由 TTL 兜底）。
+			deadline := time.Now().Add(aiTurnKeyTTL)
 			for time.Now().Before(deadline) {
 				if cached, gErr := s.rdb.Get(ctx, replyKey).Result(); gErr == nil && cached != "" {
 					slog.InfoContext(ctx, "ai chat replay after in-flight turn", slog.String("user_id", userID))
@@ -213,15 +199,21 @@ func (s *Service) chatWithPrompt(ctx context.Context, userID, message string, on
 					return cached, nil
 				}
 				if _, gErr := s.rdb.Get(ctx, turnKey).Result(); gErr != nil {
-					break // 在途标记已释放：正常生成
+					// 在途标记已释放但无回复缓存：在途请求失败（含空回复）。
+					return "", errAITurnInProgress
 				}
 				select {
 				case <-ctx.Done():
+					// AI-P2-06：在途等待期间 ctx 到期属请求超时，返回 timeout 语义，
+					// 避免 handler 误报为 upstream error；客户端主动取消仍为 cancelled。
+					if stderrors.Is(ctx.Err(), context.DeadlineExceeded) {
+						return "", errAIChatTimeout
+					}
 					return "", fmt.Errorf("stream context cancelled")
 				case <-time.After(aiTurnPollInterval):
 				}
 			}
-			// 等待超时或在途请求失败：按正常路径生成（遗留标记由 TTL 兜底）。
+			return "", errAITurnInProgress
 		}
 		// Redis 异常（SetNX 报错）时按未获取处理，走正常路径，绝不阻断对话。
 	}
@@ -231,11 +223,14 @@ func (s *Service) chatWithPrompt(ctx context.Context, userID, message string, on
 		if s.rdb == nil {
 			return
 		}
-		if acquired {
-			s.rdb.Del(context.WithoutCancel(ctx), turnKey) //nolint:errcheck // 清理失败由 TTL 兜底
-		}
+		// 先写 replyKey 再释放 turnKey：重连轮询先查 replyKey 再查 turnKey，
+		// 若先释放 turnKey，重连可能在 replyKey 尚未写入的瞬间 break 走正常生成，
+		// 造成重复扣配额+重复落库。
 		if complete && reply != "" {
 			s.rdb.Set(context.WithoutCancel(ctx), replyKey, reply, aiReplyTTL) //nolint:errcheck // 缓存失败仅失去回放能力
+		}
+		if acquired {
+			s.rdb.Del(context.WithoutCancel(ctx), turnKey) //nolint:errcheck // 清理失败由 TTL 兜底
 		}
 	}()
 
@@ -395,9 +390,9 @@ func (s *Service) buildBackground(ctx context.Context, userID, familyID string) 
 		return "暂无日记记录", nil
 	}
 
-	// 背景上下文截断：按 rune 计。原 100000 在活跃家庭可拼出 5~10 万 token，
-	// 叠加对话日志与提示词会超出 DeepSeek 上下文窗口导致全部成员对话持续失败；
-	// 下调至 20000（约 1~2 万 token）留足余量。
+	// PD-1：背景上下文按 rune 截断。原 10 万 runes 在活跃家庭可拼出 5~10 万 token，
+	// 超过上游 DeepSeek 窗口导致 400/upstream error；收敛到与审计一致的 2 万 runes
+	//（约 2 万 token），为 system prompt、历史与输出留足窗口；截断保留最新记录。
 	const maxBackgroundLen = 20000
 
 	var parts []string
@@ -409,15 +404,23 @@ func (s *Service) buildBackground(ctx context.Context, userID, familyID string) 
 	}
 
 	background := strings.Join(parts, "\n\n")
-	if utf8.RuneCountInString(background) > maxBackgroundLen {
-		runes := []rune(background)
-		background = string(runes[:maxBackgroundLen])
-	}
+	background = truncateRunes(background, maxBackgroundLen)
 	if background == "" {
 		background = "暂无日记记录"
 	}
 	_ = s.rdb.Set(ctx, cacheKey, background, backgroundCacheTTL).Err() //nolint:errcheck // cache write is best-effort
 	return background, nil
+}
+
+// truncateRunes 按 rune 数截断字符串，避免在多字节字符中间切断。
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
 }
 
 // tryConsumeDailyQuota 以数据库为配额权威，Redis 仅作辅助快速闸门。
@@ -544,4 +547,5 @@ func (s *Service) saveLog(ctx context.Context, userID, userMsg, assistantMsg str
 var (
 	ErrAIDailyQuotaExceeded = fmt.Errorf("daily ai chat quota exceeded")
 	errAIChatTimeout        = stderrors.New("ai chat timeout")
+	errAITurnInProgress     = stderrors.New("ai turn in progress")
 )

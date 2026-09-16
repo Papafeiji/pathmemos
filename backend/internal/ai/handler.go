@@ -58,7 +58,7 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
 	if err := middleware.ReadJSONBody(w, r, &req, maxChatBodySize); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if stderrors.As(err, &maxBytesErr) {
-			middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "request body too large")
+			middleware.JSONError(w, r, http.StatusRequestEntityTooLarge, errors.CodeRequestEntityTooLarge, "request body too large")
 		} else {
 			middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
 		}
@@ -71,7 +71,7 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if utf8.RuneCountInString(msg) > maxMessageCodePoints {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "message too long")
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "message too long", errors.BizTextTooLong)
 		return
 	}
 	// R4：request_id 为客户端幂等标识（断线重连复用），限定字符集与长度防止脏键/超大键。
@@ -106,16 +106,21 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
 
 		if stderrors.Is(err, ErrAIDailyQuotaExceeded) {
 			slog.WarnContext(ctx, "ai chat quota exceeded", slog.String("user_id", userID), slog.Any("error", err))
-			_ = writeSSEError(w, flusher, errors.BizAIDailyQuotaExceeded, "daily ai chat quota exceeded") //nolint:errcheck // error already propagated to client as SSE event
+			_ = writeSSEError(w, flusher, errors.CodeTooManyRequests, errors.BizAIDailyQuotaExceeded, "daily ai chat quota exceeded") //nolint:errcheck // error already propagated to client as SSE event
+			return
+		}
+		if stderrors.Is(err, errAITurnInProgress) {
+			slog.InfoContext(ctx, "ai turn in progress, reject reconnect", slog.String("user_id", userID))
+			_ = writeSSEError(w, flusher, errors.CodeTooManyRequests, errors.BizOperationInProgress, "ai turn in progress, retry later") //nolint:errcheck // error already propagated to client as SSE event
 			return
 		}
 		if stderrors.Is(err, context.DeadlineExceeded) || stderrors.Is(err, errAIChatTimeout) {
 			slog.ErrorContext(ctx, "ai chat timeout", slog.String("user_id", userID), slog.Any("error", err))
-			_ = writeSSEError(w, flusher, errors.CodeInternalError, "timeout") //nolint:errcheck // error already propagated to client as SSE event
+			_ = writeSSEError(w, flusher, errors.CodeInternalError, "", "timeout") //nolint:errcheck // error already propagated to client as SSE event
 			return
 		}
 		slog.ErrorContext(ctx, "ai chat upstream error", slog.String("user_id", userID), slog.Any("error", err))
-		_ = writeSSEError(w, flusher, errors.CodeInternalError, "upstream error") //nolint:errcheck // error already propagated to client as SSE event
+		_ = writeSSEError(w, flusher, errors.CodeInternalError, "", "upstream error") //nolint:errcheck // error already propagated to client as SSE event
 		return
 	}
 

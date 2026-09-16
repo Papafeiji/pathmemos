@@ -280,14 +280,14 @@ func (m *SessionMiddleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessionID := extractBearerToken(r)
 		if sessionID == "" {
-			JSONError(w, r, http.StatusUnauthorized, errors.BizSessionInvalid, "missing session")
+			JSONBizError(w, r, errors.BizSessionInvalid, "missing session")
 			return
 		}
 
 		userID, err := m.sessions.Get(r.Context(), sessionID)
 		if err != nil {
 			if stderrors.Is(err, redis.Nil) {
-				JSONError(w, r, http.StatusUnauthorized, errors.BizSessionInvalid, "invalid or expired session")
+				JSONBizError(w, r, errors.BizSessionInvalid, "invalid or expired session")
 				return
 			}
 

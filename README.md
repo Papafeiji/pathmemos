@@ -76,7 +76,7 @@ cd pathmemos
 
 可选项：
 
-- `AI_PROVIDER` / `AI_BASE_URL` / `AI_MODEL`：AI 服务配置
+- `AI_BASE_URL` / `AI_MODEL`：AI 服务配置（服务商由 Base URL 与模型名决定）
 - `OPEN_API_KEY`：后端 API Key（`init.sh` 自动生成），在小程序「开源版本」页面填写此 Key 即可切换后端
 - `CLOUDFLARE_TUNNEL_TOKEN`：Cloudflare Tunnel token（`install.sh` / `expose.sh` 自动写入）
 - `API_HOST`：后端公网地址（`install.sh` / `expose.sh` 自动写入）

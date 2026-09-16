@@ -46,10 +46,8 @@ Component({
 
   lifetimes: {
     attached(this: any) {
-      // 组件实例被回收复用时，_deleting 可能仍停留在 true，导致新项无法删除。
       this._isDestroyed = false;
       this._isHidden = false;
-      this._deleting = false;
       this._lastInfoId = undefined;
       const info = this.data.info;
       if (info) {
@@ -69,7 +67,6 @@ Component({
         this._cancelToken = null;
       }
       this._isDetached = true;
-      this._deleting = false;
       this._ignoreNextTap = false;
       (this as any)._isDestroyed = true;
     },
@@ -77,7 +74,7 @@ Component({
 
   pageLifetimes: {
     hide(this: any) {
-      // 删除是写操作，不在 page hide 时取消请求；_cancelToken / _deleting 在 detached / 删除完成时清理。
+      // 删除是写操作，不在 page hide 时取消请求；_cancelToken 在 detached / 删除完成时清理。
       (this as any)._forceSetData({
         'confirmDialog.visible': false,
         isTouchLeft: false,
@@ -164,7 +161,6 @@ Component({
       // 按 FP076：记忆删除为普通业务，不做函数级防重入锁。
       const id = this.data.info?.id;
       if (!id) return;
-      (this as any)._deleting = true;
       const cancelToken = createCancelToken();
       (this as any)._cancelToken = cancelToken;
       (this as any)._safeSetData({ 'confirmDialog.visible': false, isTouchLeft: false });
@@ -179,7 +175,6 @@ Component({
         if (!(this as any)._isAlive() || error?.message === 'request:abort') return;
         wx.showToast({ title: getErrorMessage(error, (this as any).$t('memoryItem.deleteFail')), icon: 'none' });
       } finally {
-        (this as any)._deleting = false;
         if ((this as any)._cancelToken === cancelToken) {
           (this as any)._cancelToken = null;
         }

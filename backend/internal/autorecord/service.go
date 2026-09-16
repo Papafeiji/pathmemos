@@ -28,7 +28,6 @@ const (
 	stayPointMergeRadiusM = 300.0
 	stayPointMergeWindow  = 30 * time.Minute
 	maxPendingPerUser     = 100
-	vipGraceDays          = 3
 	processWorkers        = 5
 	maxGeocodeAttempts    = 10
 )
@@ -36,7 +35,7 @@ const (
 type Service struct {
 	pool  *db.Pool
 	rdb   *redis.Client
-	lock  *db.Lock
+	lock  db.Locker
 	loc   *location.Client
 	diary DiaryCoverRefresher
 	push  PushService
@@ -56,14 +55,14 @@ func NewService(pool *db.Pool, rdb *redis.Client, cfg *config.Config, diary Diar
 	return &Service{
 		pool:  pool,
 		rdb:   rdb,
-		lock:  db.NewLock(rdb),
+		lock:  db.NewAdvisoryLock(pool.PGX()),
 		loc:   location.NewClient(cfg.TencentMapKeys),
 		diary: diary,
 		push:  push,
 	}
 }
 
-// TouchActiveAt updates user's last active timestamp and resets today's abnormal alert flag.
+// TouchActiveAt 仅更新 last_active_at，不重置 abnormal_alert_sent_at（AR-11.7：告警抑制由候选 SQL 的 last_active_at 条件实现）。
 func (s *Service) TouchActiveAt(ctx context.Context, userID string) error {
 	if s.push == nil {
 		return nil
@@ -71,7 +70,8 @@ func (s *Service) TouchActiveAt(ctx context.Context, userID string) error {
 	return s.push.TouchActiveAt(ctx, userID)
 }
 
-func (s *Service) IsVIPRelaxed(ctx context.Context, userID string) bool {
+// HasActiveVIP 严格判定：expire_time > now，无宽限期（与 02c「严格 VIP」口径一致）。
+func (s *Service) HasActiveVIP(ctx context.Context, userID string) bool {
 	return s.vipInfo(ctx, userID)
 }
 
@@ -111,8 +111,7 @@ func (s *Service) ProcessRound(ctx context.Context) error {
 
 func (s *Service) processUser(ctx context.Context, userID string) (err error) {
 	lockKey := "lock:auto_record:" + userID
-	lockTTL := 3 * time.Minute
-	ok, lockToken, err := s.lock.TryLock(ctx, lockKey, lockTTL)
+	ok, lockToken, err := s.lock.TryLock(ctx, lockKey)
 	if err != nil {
 		slog.ErrorContext(ctx, "auto record process user lock error", slog.String("user_id", userID), slog.Any("error", err))
 		return err
@@ -122,17 +121,15 @@ func (s *Service) processUser(ctx context.Context, userID string) (err error) {
 	}
 
 	// 封面刷新与缓存失效必须在分布式锁释放后再异步执行，避免异步任务开始时锁仍被占用
-	//（AGENTS.md §3.8/§4.1）。origCtx 保留原始（未绑定续期）的 context，供锁释放与异步刷新使用，
-	// 不受续期取消影响。
-	origCtx := ctx
+	//（AGENTS.md §3.8/§4.1）。
 	var asyncFamilyID string
 	var asyncDates []string
 	defer func() {
-		if uerr := s.lock.Unlock(context.WithoutCancel(origCtx), lockKey, lockToken); uerr != nil {
-			slog.ErrorContext(origCtx, "auto record unlock failed", slog.String("user_id", userID), slog.Any("error", uerr))
+		if uerr := s.lock.Unlock(context.WithoutCancel(ctx), lockKey, lockToken); uerr != nil {
+			slog.ErrorContext(ctx, "auto record unlock failed", slog.String("user_id", userID), slog.Any("error", uerr))
 		}
 		if err == nil && asyncFamilyID != "" && len(asyncDates) > 0 {
-			safe.Go(origCtx, nil, func() {
+			safe.Go(ctx, nil, func() {
 				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				for _, recordDate := range asyncDates {
@@ -150,20 +147,13 @@ func (s *Service) processUser(ctx context.Context, userID string) (err error) {
 				}
 				// 封面刷新完成后再删除汇总缓存，避免刷新期间其他读请求用旧封面重建缓存。
 				if s.rdb != nil {
-					if err := s.rdb.Del(context.WithoutCancel(origCtx), "ai:family_summary:"+asyncFamilyID).Err(); err != nil {
-						slog.WarnContext(origCtx, "invalidate family summary cache failed", slog.String("family_id", asyncFamilyID), slog.Any("error", err))
+					if err := s.rdb.Del(context.WithoutCancel(ctx), "ai:family_summary:"+asyncFamilyID).Err(); err != nil {
+						slog.WarnContext(ctx, "invalidate family summary cache failed", slog.String("family_id", asyncFamilyID), slog.Any("error", err))
 					}
 				}
 			})
 		}
 	}()
-
-	// 锁持有时长 3 分钟（>120 秒），按 AGENTS.md §五.3 补充约定统一用 StartLockRenewal
-	// 后台每隔 TTL×80% 续期一次；任一续期失败（丢锁/被抢占）会立即 cancel renewCtx，
-	// 使后续所有 DB/geocode 操作因 context 取消而中止（AR04/AR04a）。
-	renewCtx, stopRenewal := s.lock.StartLockRenewal(origCtx, map[string]string{lockKey: lockToken}, lockTTL)
-	defer stopRenewal()
-	ctx = renewCtx
 
 	user, err := s.pool.Queries().GetUserByID(ctx, userID)
 	if err != nil {
@@ -197,6 +187,11 @@ func (s *Service) processUser(ctx context.Context, userID string) (err error) {
 
 	clusters, invalidIDs := s.mergeStayPoints(rows)
 	if len(clusters) == 0 {
+		// OPS-LOG：轨迹未形成停留点即被清理（用于数据问题复盘）。
+		slog.InfoContext(ctx, "auto record round no clusters",
+			slog.String("user_id", userID),
+			slog.Int("trajectories", len(rows)),
+		)
 		return s.pool.Queries().DeleteTrajectories(ctx, collectTrajectoryIDs(rows))
 	}
 
@@ -247,9 +242,7 @@ func (s *Service) processUser(ctx context.Context, userID string) (err error) {
 			var geocodeErr error
 			landmark, address, geocodeErr = s.reverseGeocode(ctx, lat.Float64, lon.Float64)
 			if geocodeErr != nil {
-				if s.handleGeocodeRetry(ctx, rows, cluster.ids, userID) {
-					toDelete = append(toDelete, cluster.ids...)
-				}
+				s.handleGeocodeRetry(ctx, rows, cluster.ids, userID)
 				slog.ErrorContext(ctx, "auto record reverse geocode failed, skip cluster",
 					slog.String("user_id", userID),
 					slog.Int("index", idx),
@@ -262,9 +255,7 @@ func (s *Service) processUser(ctx context.Context, userID string) (err error) {
 			// 空地址但返回了 landmark（POI）时降级用 landmark 生成条目，
 			// 避免偏远地区/海外坐标在 10 轮重试后被静默删轨迹。
 			if address == "" && landmark == "" {
-				if s.handleGeocodeRetry(ctx, rows, cluster.ids, userID) {
-					toDelete = append(toDelete, cluster.ids...)
-				}
+				s.handleGeocodeRetry(ctx, rows, cluster.ids, userID)
 				slog.WarnContext(ctx, "auto record reverse geocode returned empty address, skip cluster",
 					slog.String("user_id", userID),
 					slog.Int("index", idx),
@@ -412,6 +403,15 @@ func (s *Service) processUser(ctx context.Context, userID string) (err error) {
 				slog.Any("error", derr))
 		}
 	}
+
+	// OPS-LOG：自动记录轮次处理结果（用于数据问题复盘）。
+	slog.InfoContext(ctx, "auto record round processed",
+		slog.String("user_id", userID),
+		slog.Int("trajectories", len(rows)),
+		slog.Int("clusters", len(clusters)),
+		slog.Int("entries_created", len(createdDates)),
+		slog.Int("deleted", len(toDelete)),
+	)
 
 	return nil
 }
@@ -591,7 +591,7 @@ func (s *Service) vipInfo(ctx context.Context, userID string) bool {
 	if err != nil {
 		return false
 	}
-	return row.ExpireTime.Time.After(time.Now().UTC().Add(-vipGraceDays * 24 * time.Hour))
+	return row.ExpireTime.Time.After(time.Now().UTC())
 }
 
 func (s *Service) reverseGeocode(ctx context.Context, lat, lon float64) (landmark, address string, err error) {
@@ -642,7 +642,9 @@ func parseDate(s string) (time.Time, error) {
 	return t, nil
 }
 
-func (s *Service) handleGeocodeRetry(ctx context.Context, rows []sqlc.AutoRecordTrajectory, clusterIDs []string, userID string) bool {
+// handleGeocodeRetry 记录逆地理失败次数，但**从不删除轨迹**：暂时性故障（腾讯 API 宕机/
+// 配额耗尽）恢复后仍可生成驻点，轨迹由 7 天清理窗口统一回收，避免数据永久丢失（PPJ-C03）。
+func (s *Service) handleGeocodeRetry(ctx context.Context, rows []sqlc.AutoRecordTrajectory, clusterIDs []string, userID string) {
 	clusterSet := make(map[string]struct{}, len(clusterIDs))
 	for _, id := range clusterIDs {
 		clusterSet[id] = struct{}{}
@@ -655,11 +657,10 @@ func (s *Service) handleGeocodeRetry(ctx context.Context, rows []sqlc.AutoRecord
 				slog.String("user_id", userID),
 				slog.String("traj_id", row.ID),
 				slog.Int64("attempts", int64(row.GeocodeAttempts)))
-			return false
+			return
 		}
 	}
 	if incErr := s.pool.Queries().IncrementTrajectoryGeocodeAttempts(ctx, clusterIDs); incErr != nil {
 		slog.WarnContext(ctx, "auto record increment geocode attempts failed", slog.String("user_id", userID), slog.Any("error", incErr))
 	}
-	return false
 }

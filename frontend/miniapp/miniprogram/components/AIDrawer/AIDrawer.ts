@@ -52,6 +52,8 @@ Component({
   _aiTextDirty: false,
   _aiFlushTimer: null as any,
   _sending: false,
+  // PPJ-A04：发送代次。每次 send 自增，旧 SSE 的回调据此失效，避免旧流 abort 时同步复位 _sending。
+  _sendSeq: 0,
   _diaryCardsCancelToken: null as CancelToken | null,
   _loginCancelToken: null as CancelToken | null,
 
@@ -209,8 +211,9 @@ Component({
       try {
         if (self._sending || !prompt?.trim()) return;
 
-        if ([...prompt].length > 500) {
-          wx.showToast({ title: (this as any).$t('aiDrawer.maxLength', { count: 500 }), icon: 'none' });
+        // PD-7：与后端 maxMessageCodePoints 统一为 2500，避免两端口径不一致。
+        if ([...prompt].length > 2500) {
+          wx.showToast({ title: (this as any).$t('aiDrawer.maxLength', { count: 2500 }), icon: 'none' });
           return;
         }
 
@@ -223,14 +226,6 @@ Component({
           _msgId: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         };
         const newList = this._trimOldMessages([...this.data.list, userMsg]);
-
-        self._history = newList
-          .slice(0, -1)
-          .filter((item: any) => item.txt)
-          .map((item: any) => ({
-            role: item.type === MESSAGE_TYPES.USER ? 'user' : 'assistant',
-            content: item.txt,
-          }));
 
         this._safeSetData({
           connecting: true,
@@ -378,8 +373,11 @@ Component({
         return;
       }
       self._aiTextDirty = false;
-      // 先设置新状态再中止旧 SSE，防止旧 SSE 的 onclose/onerror 回调
-      // 异步复位 _sending/loading 覆盖新状态。
+      // PPJ-A04：先递增发送代次并置发送锁，再中止旧 SSE。
+      // 旧 SSE 的 abort 会同步触发其 onclose/onerror，代次不匹配时旧回调直接返回，
+      // 不会把 _sending 复位导致新流在锁失效下运行（慢网/连点并发发送）。
+      const sendSeq = ((self._sendSeq as number) || 0) + 1;
+      self._sendSeq = sendSeq;
       self._sending = true;
       this._safeSetData({ loading: true });
       this._abortSSE();
@@ -387,7 +385,6 @@ Component({
       this._aiText = '';
 
       const message = prompt !== undefined ? prompt : this.data.inputValue;
-      const history = (self._history || []) as any[];
 
       const sseBaseURL = getSSEBaseURL();
       if (!sseBaseURL) {
@@ -444,9 +441,10 @@ Component({
       const sse = eventSource({
         url: `${sseBaseURL}/ai/chat`,
         header: sseHeaders,
-        data: { message, history, request_id: requestId },
+        data: { message, request_id: requestId },
         onreconnect: () => {
           if (this._isDestroyed || this._isDetached) return;
+          if (sendSeq !== self._sendSeq) return;
           // 自动重连前清空半截输出：新流会重新 onopen 建立气泡，避免新旧内容拼接。
           self._aiText = '';
           self._aiTextDirty = false;
@@ -462,12 +460,14 @@ Component({
         },
         onopen: () => {
           if (this._isDestroyed || this._isDetached) return;
+          if (sendSeq !== self._sendSeq) return;
           const aiMsg = { type: MESSAGE_TYPES.PPFJ, txt: '', html: '', diaryCard: [], _msgId: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}` };
           const newList = this._trimOldMessages([...this.data.list, aiMsg]);
           this._safeSetData({ list: newList, scrollIntoId: 'msg-bottom' });
         },
         onmessage: (res: any) => {
           if (this._isDestroyed || this._isDetached) return;
+          if (sendSeq !== self._sendSeq) return;
           const { data, done } = res;
           const safeData = data == null ? '' : String(data);
           self._aiText += safeData;
@@ -485,6 +485,7 @@ Component({
         },
         onclose: () => {
           if (this._isDestroyed || this._isDetached) return;
+          if (sendSeq !== self._sendSeq) return;
           const list = this.data.list as any[];
           const lastIndex = list.length - 1;
           const last = list[lastIndex];
@@ -501,6 +502,7 @@ Component({
         },
         onerror: (err: any) => {
           if (this._isDestroyed || this._isDetached) return;
+          if (sendSeq !== self._sendSeq) return;
           if ((this as any)._aiFlushTimer) {
             clearTimeout((this as any)._aiFlushTimer);
             (this as any)._aiFlushTimer = null;

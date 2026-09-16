@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "scripts": {
     "lint": "tsc --noEmit && eslint 'miniprogram/**/*.ts' --max-warnings 0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "jest"
   },
   "keywords": [],
   "author": "",
@@ -13,10 +14,14 @@
     "tslib": "^2.8.1"
   },
   "devDependencies": {
+    "@jest/globals": "^30.5.1",
+    "@types/jest": "^30.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^8.57.0",
+    "jest": "^30.5.1",
     "miniprogram-api-typings": "^2.8.3-1",
+    "ts-jest": "^29.4.12",
     "typescript": "^6.0.3"
   },
   "main": "miniprogram/app.ts",

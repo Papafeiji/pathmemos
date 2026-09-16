@@ -80,6 +80,18 @@ func newWechatTestServer(t *testing.T) (*WechatClient, *httptest.Server) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"errcode": 40029, "errmsg": "invalid code"})
 	})
+	// 供 BindPhone 测试：stable_token + 手机号置换
+	mux.HandleFunc("/cgi-bin/stable_token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok-1", "expires_in": 7200})
+	})
+	mux.HandleFunc("/wxa/business/getuserphonenumber", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"errcode": 0, "errmsg": "ok",
+			"phone_info": map[string]interface{}{"phoneNumber": "13800000000"},
+		})
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

@@ -43,6 +43,16 @@ type AutoRecordTrajectory struct {
 	CreatedAt       pgtype.Timestamptz `json:"createdAt"`
 }
 
+type ClientOpsLog struct {
+	ID           string             `json:"id"`
+	UserID       string             `json:"userId"`
+	Device       string             `json:"device"`
+	AppVersion   string             `json:"appVersion"`
+	Events       []byte             `json:"events"`
+	ClientSentAt pgtype.Timestamptz `json:"clientSentAt"`
+	CreatedAt    pgtype.Timestamptz `json:"createdAt"`
+}
+
 type Diary struct {
 	ID         string             `json:"id"`
 	UserID     string             `json:"userId"`
@@ -135,15 +145,6 @@ type Order struct {
 	PaidAt        pgtype.Timestamptz `json:"paidAt"`
 	CreatedAt     pgtype.Timestamptz `json:"createdAt"`
 	UpdatedAt     pgtype.Timestamptz `json:"updatedAt"`
-}
-
-type SysConfig struct {
-	ID                 string             `json:"id"`
-	AiConfig           []byte             `json:"aiConfig"`
-	SysConfig          []byte             `json:"sysConfig"`
-	DefaultDiaryConfig []byte             `json:"defaultDiaryConfig"`
-	AiPrompt           pgtype.Text        `json:"aiPrompt"`
-	UpdatedAt          pgtype.Timestamptz `json:"updatedAt"`
 }
 
 type User struct {

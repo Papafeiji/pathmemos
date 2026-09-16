@@ -1,3 +1,4 @@
+SET search_path = public;
 -- H1 修复：迁移合并（squash）时丢失的种子数据——全新环境（开源版全新安装/新 staging/灾备重建）必须有
 -- 默认 sys_configs 行与 vips 种子，否则服务启动即失败（sysconfig.go 对 count=0 硬报错）且支付/领取不可用。
 INSERT INTO sys_configs (id, ai_config, sys_config, default_diary_config, ai_prompt) VALUES (

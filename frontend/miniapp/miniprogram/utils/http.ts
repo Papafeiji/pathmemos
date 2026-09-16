@@ -384,7 +384,8 @@ const _uploadWithGuard = (
           }
 
           const code = parsed?.code;
-          const bizCode = parsed?.bizCode;
+          // 后端 envelope 使用 biz_code（middleware/response.go），兼容历史 bizCode 写法。
+          const bizCode = parsed?.biz_code || parsed?.bizCode;
           const effectiveCode = bizCode || code;
           const msg = parsed?.message || parsed?.msg;
 
@@ -444,22 +445,25 @@ export const uploadFile = async (
     imageIds.push(pid);
   }
   try {
-    const toUploadPaths: string[] = [];
-    for (const { path, type, id } of fileLists) {
+    // PPJ-B08：记录每个待上传项在 fileLists 中的下标，成功结果可回写调用方对象，
+    // 使部分失败后的重试只补传失败项，而不是整批重传（孤儿文件 + 配额浪费）。
+    const uploadTargets: { index: number; path: string }[] = [];
+    for (let i = 0; i < fileLists.length; i++) {
+      const { path, type, id } = fileLists[i];
       if (type === FILE_TYPE.TO_BE_UPLOADED) {
-        toUploadPaths.push(path);
+        uploadTargets.push({ index: i, path });
       } else if (type === FILE_TYPE.UPLOADED && id) {
         imageIds.push(id);
       }
     }
 
-    if (toUploadPaths.length > 0) {
-      const uploadTasks = toUploadPaths.map((path) => () => _uploadOne(path, url, cancelToken));
+    if (uploadTargets.length > 0) {
+      const uploadTasks = uploadTargets.map((t) => () => _uploadOne(t.path, url, cancelToken));
       const results = await runWithConcurrency(uploadTasks, 3) as (string | Error)[];
       const successIds: string[] = [];
       const failedPaths: string[] = [];
       let storageLimitError: Error | null = null;
-      let allAborted = toUploadPaths.length > 0;
+      let allAborted = uploadTargets.length > 0;
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
         if (r instanceof Error) {
@@ -469,16 +473,17 @@ export const uploadFile = async (
           if (r.message !== 'request:abort') {
             allAborted = false;
           }
-          failedPaths.push(toUploadPaths[i]);
+          failedPaths.push(uploadTargets[i].path);
           logger.error('uploadFile: 单个文件上传失败', r);
         } else {
           successIds.push(r);
+          (fileLists[uploadTargets[i].index] as any).uploadedId = r;
           allAborted = false;
         }
       }
       imageIds.push(...successIds);
       if (failedPaths.length > 0) {
-        logger.error('uploadFile: 部分文件上传失败', { failedCount: failedPaths.length, total: toUploadPaths.length });
+        logger.error('uploadFile: 部分文件上传失败', { failedCount: failedPaths.length, total: uploadTargets.length });
         if (allAborted) {
           throw new Error('request:abort');
         }

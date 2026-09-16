@@ -52,6 +52,7 @@ func (q *Queries) IncrementTrajectoryGeocodeAttempts(ctx context.Context, dollar
 const insertTrajectories = `-- name: InsertTrajectories :exec
 INSERT INTO auto_record_trajectories (id, user_id, lat, lon, recorded_at, geocode_attempts, created_at)
 SELECT unnest($1::text[]), unnest($2::text[]), unnest($3::text[])::numeric, unnest($4::text[])::numeric, unnest($5::timestamptz[]), 0, now()
+ON CONFLICT DO NOTHING
 `
 
 type InsertTrajectoriesParams struct {
@@ -62,6 +63,7 @@ type InsertTrajectoriesParams struct {
 	RecordedAts []pgtype.Timestamptz `json:"recordedAts"`
 }
 
+// PPJ-C04：重复上报（同一 user+recorded_at+lat+lon）静默忽略，避免重试产生重复轨迹。
 func (q *Queries) InsertTrajectories(ctx context.Context, arg InsertTrajectoriesParams) error {
 	_, err := q.db.Exec(ctx, insertTrajectories,
 		arg.Ids,
@@ -83,7 +85,8 @@ LEFT JOIN LATERAL (
     WHERE t.user_id = u.id
 ) lt ON true
 WHERE u.auto_record_enabled = true
-  AND v.expire_time > now() - interval '3 days'
+  -- PPJ-C01：告警发送侧用严格 VIP（无宽限），候选侧也须严格，否则过期用户每轮入选又被跳过。
+  AND v.expire_time > now()
   AND (
       u.abnormal_alert_sent_at IS NULL
       OR u.abnormal_alert_sent_at < now() - interval '1 hour'
@@ -142,7 +145,7 @@ JOIN (
     GROUP BY user_id
 ) t ON t.user_id = u.id
 WHERE u.auto_record_enabled = true
-  AND v.expire_time > now() - interval '3 days'
+  AND v.expire_time > now()
 ORDER BY t.cnt DESC
 LIMIT $1
 `

@@ -51,20 +51,21 @@ func TestConfig_Validate_Covers_RequiredRuntimeVars(t *testing.T) {
 
 func configWithAllFilledExcept(emptyVar string) *Config {
 	cfg := &Config{
-		DatabaseURL:                "postgres://x",
-		RedisAddr:                  "redis://x",
-		WechatAppID:                "wx",
-		WechatSecret:               "secret",
-		WechatVirtualOfferID:       "offer",
-		WechatVirtualAppKeyProd:    "prod-key",
-		WechatVirtualAppKeySandbox: "sandbox-key",
-		WechatMsgToken:             "token",
-		WechatVirtualCallbackToken: "cb-token",
+		DatabaseURL:                 "postgres://x",
+		RedisAddr:                   "redis://x",
+		WechatAppID:                 "wx",
+		WechatSecret:                "secret",
+		WechatVirtualOfferID:        "offer",
+		WechatVirtualAppKeyProd:     "prod-key",
+		WechatVirtualAppKeySandbox:  "sandbox-key",
+		WechatMsgToken:              "token",
+		WechatVirtualCallbackToken:  "cb-token",
 		WechatVirtualCallbackAESKey: "cb-aes-key",
-		TencentMapKeys:             []string{"map-key"},
-		AIAPIKey:                   "ai-key",
-		APIHost:                    "api.example.com",
-		DeploymentMode:             "saas",
+		TencentMapKeys:              []string{"map-key"},
+		AIAPIKey:                    "ai-key",
+		APIHost:                     "api.example.com",
+		DeploymentMode:              "saas",
+		WorkerSecret:                "worker-secret",
 	}
 
 	switch emptyVar {
@@ -88,6 +89,8 @@ func configWithAllFilledExcept(emptyVar string) *Config {
 		cfg.WechatVirtualAppKeySandbox = ""
 	case "API_HOST":
 		cfg.APIHost = ""
+	case "WORKER_SECRET":
+		cfg.WorkerSecret = ""
 	case "WECHAT_MSG_TOKEN":
 		cfg.WechatMsgToken = ""
 	case "WECHAT_VIRTUAL_CALLBACK_TOKEN":

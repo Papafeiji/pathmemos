@@ -18,7 +18,6 @@ import (
 
 const (
 	trialVIPID = "vip-trial-0001"
-	freeVIPID  = "vip-free-0001"
 )
 
 type Service struct {
@@ -81,20 +80,6 @@ func (s *Service) HasVIPClaim(ctx context.Context, userID, vipID string) (bool, 
 	return exists, nil
 }
 
-func (s *Service) ExtendVIPDays(ctx context.Context, userID string, days int) error {
-	// B6b-08：非法参数显式报错，不再静默成功。
-	if userID == "" {
-		return fmt.Errorf("empty user id")
-	}
-	if days <= 0 {
-		return fmt.Errorf("days must be positive, got %d", days)
-	}
-
-	return db.WithTx(ctx, s.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
-		return s.ExtendVIPDaysWithTx(ctx, userID, days, q)
-	})
-}
-
 func (s *Service) ExtendVIPDaysWithTx(ctx context.Context, userID string, days int, q *sqlc.Queries) error {
 	if userID == "" {
 		return fmt.Errorf("empty user id")
@@ -117,13 +102,32 @@ func (s *Service) ExtendVIPDaysWithTx(ctx context.Context, userID string, days i
 		expire = base.AddDate(0, 0, days)
 		id = existing.ID
 	} else if errors.Is(err, pgx.ErrNoRows) {
-		begin = now
-		expire = now.AddDate(0, 0, days)
+		// VP-P2-02：并发首次下发（无 user_vips 行）时 GetUserVIPForUpdate 锁不住不存在的行，
+		// 两个并发调用会各自按 now 计算 expire，UpsertUserVIP 的 GREATEST 只保留较大者，
+		// 较小档时长被吞。先 ON CONFLICT DO NOTHING 占位，再 FOR UPDATE 重读串行化创建。
 		newID, err := util.NewUUID()
 		if err != nil {
 			return fmt.Errorf("generate user vip id: %w", err)
 		}
-		id = newID
+		if err := q.ClaimUserVIPRow(ctx, sqlc.ClaimUserVIPRowParams{
+			ID:         newID,
+			UserID:     userID,
+			BeginTime:  pgtype.Timestamptz{Time: now, Valid: true},
+			ExpireTime: pgtype.Timestamptz{Time: now.Add(time.Second), Valid: true},
+		}); err != nil {
+			return fmt.Errorf("claim user vip row: %w", err)
+		}
+		claimed, err := q.GetUserVIPForUpdate(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("re-read user vip for update: %w", err)
+		}
+		begin = claimed.BeginTime.Time
+		base := now
+		if claimed.ExpireTime.Time.After(now) {
+			base = claimed.ExpireTime.Time
+		}
+		expire = base.AddDate(0, 0, days)
+		id = claimed.ID
 	} else {
 		return fmt.Errorf("get user vip: %w", err)
 	}
@@ -226,11 +230,13 @@ func (s *Service) activateVIPWithTx(ctx context.Context, userID string, vipRecor
 		if err != nil {
 			return fmt.Errorf("generate user vip id: %w", err)
 		}
+		// 占位行必须满足 CHECK (expire_time > begin_time)：expire 取 now+1s（严格大于 begin），
+		// 该值仅占位，紧接的 FOR UPDATE 重读 + UpsertUserVIP 会立即改写为真实时长。
 		if err := q.ClaimUserVIPRow(ctx, sqlc.ClaimUserVIPRowParams{
 			ID:         newUserVipID,
 			UserID:     userID,
 			BeginTime:  pgtype.Timestamptz{Time: now, Valid: true},
-			ExpireTime: pgtype.Timestamptz{Time: now, Valid: true},
+			ExpireTime: pgtype.Timestamptz{Time: now.Add(time.Second), Valid: true},
 		}); err != nil {
 			return fmt.Errorf("claim user vip row: %w", err)
 		}

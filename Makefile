@@ -1,4 +1,4 @@
-.PHONY: build dev migrate-up migrate-down sqlc-generate check-sqlc-sync lint lint-go lint-frontend lint-worker test clean
+.PHONY: build dev migrate-up migrate-down sqlc-generate check-sqlc-sync lint lint-go lint-frontend lint-worker test test-frontend test-worker clean
 
 build-linux:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/pathmemos ./backend/cmd/server
@@ -26,8 +26,17 @@ check-sqlc-sync:
 	@python3 scripts/check_sqlc_sync.py
 
 test:
-	@echo "==> Go 单元测试..."
-	go test ./backend/... -count=1 -timeout 120s
+	@echo "==> Go 单元测试（含 race detector）..."
+	go test -race ./backend/... -count=1 -timeout 300s
+
+test-frontend:
+	@echo "==> 小程序单元测试..."
+	@cd frontend/miniapp && npm test
+
+test-worker:
+	@echo "==> Cloudflare Worker 单元测试..."
+	@cd api-worker && npm test
+	@cd mcp-worker && npm test
 
 lint: lint-go
 	@if [ -f frontend/miniapp/package.json ] && command -v npm >/dev/null 2>&1; then $(MAKE) lint-frontend; fi

@@ -139,7 +139,7 @@ func (l *IPRateLimiter) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r, l.trustedProxies)
 		if !l.sw.allow(ip) {
-			JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "too many requests")
+			JSONBizError(w, r, errors.BizRateLimited, "too many requests")
 			return
 		}
 		next.ServeHTTP(w, r)

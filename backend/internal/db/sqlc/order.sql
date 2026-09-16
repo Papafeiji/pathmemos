@@ -14,6 +14,15 @@ UPDATE orders SET
     updated_at = now()
 WHERE out_trade_no = $1 AND state = 'pending';
 
+-- name: MarkClosedOrderPaid :execrows
+-- VP-P1-02：订单已被本地关闭（取消/超时/换单清理）但用户仍完成支付，补记为 paid 以便发货。
+UPDATE orders SET
+    state = 'paid',
+    transaction_id = sqlc.arg(transaction_id),
+    paid_at = now(),
+    updated_at = now()
+WHERE out_trade_no = $1 AND state = 'closed';
+
 -- name: CloseOrder :execrows
 UPDATE orders SET state = 'closed', updated_at = now() WHERE out_trade_no = $1 AND state = 'pending' AND user_id = $2;
 

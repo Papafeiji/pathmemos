@@ -220,3 +220,35 @@ func TestActivateVIPWithTx_ExpiredRestartsFromNow(t *testing.T) {
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
+
+// TestExtendVIPDaysWithTx_NewUserClaimsRow VP-P2-02：无 user_vips 行的并发首次下发，
+// 走 ClaimUserVIPRow 占位 + FOR UPDATE 重读串行化，避免 GREATEST 吞掉较小档时长。
+func TestExtendVIPDaysWithTx_NewUserClaimsRow(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("new mock pool: %v", err)
+	}
+	defer mock.Close()
+
+	now := timeutil.NowShanghai()
+	mock.ExpectQuery("FROM user_vips WHERE user_id = \\$1 FOR UPDATE").
+		WithArgs("u1").
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectExec("INSERT INTO user_vips").
+		WithArgs(pgxmock.AnyArg(), "u1", pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectQuery("FROM user_vips WHERE user_id = \\$1 FOR UPDATE").
+		WithArgs("u1").
+		WillReturnRows(userVipRows("uv-1", "u1", now, now.Add(time.Second)))
+	mock.ExpectQuery("INSERT INTO user_vips").
+		WithArgs("uv-1", "u1", pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(userVipRows("uv-1", "u1", now, now.AddDate(0, 0, 7)))
+
+	s := &Service{}
+	if err := s.ExtendVIPDaysWithTx(context.Background(), "u1", 7, sqlc.New(mock)); err != nil {
+		t.Fatalf("extend failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}

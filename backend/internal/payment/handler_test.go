@@ -134,8 +134,43 @@ func TestHandleNotify_DuplicateNotify(t *testing.T) {
 	}
 }
 
-// TestHandleNotify_AmountMismatch 金额不符 → errNotifyRejected（业务性拒绝）。
-func TestHandleNotify_AmountMismatch(t *testing.T) {
+// TestHandleNotify_AmountMismatchDelivers VP-P1-01：金额与标价不一致（平台立减/优惠）时，
+// 回调已验签且用户已扣款，应照常发货而不是业务拒绝静默漏发。
+func TestHandleNotify_AmountMismatchDelivers(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("new mock pool: %v", err)
+	}
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM orders WHERE out_trade_no = \\$1").
+		WithArgs("OT-1001").
+		WillReturnRows(orderRows("order-1", "u1", "vip-month-0001", "OT-1001", "pending", 100))
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM orders WHERE out_trade_no = \\$1").
+		WithArgs("OT-1001").
+		WillReturnRows(orderRows("order-1", "u1", "vip-month-0001", "OT-1001", "pending", 100))
+	mock.ExpectExec("UPDATE orders SET").
+		WithArgs("OT-1001", pgtype.Text{String: "WX-1001", Valid: true}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	v := &mockVIPService{}
+	h := newNotifyHandler(mock, v)
+	err = h.handleNotify(context.Background(), notifyPayload("OT-1001", "WX-1001", 99))
+	if err != nil {
+		t.Fatalf("amount mismatch should still deliver, got: %v", err)
+	}
+	if v.activateCalls != 1 {
+		t.Fatalf("ActivateVIPWithTx calls = %d, want 1 (deliver despite discount)", v.activateCalls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestHandleNotify_AmountInvalid 金额为 0/负数 → errNotifyRejected，不进入事务。
+func TestHandleNotify_AmountInvalid(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatalf("new mock pool: %v", err)
@@ -148,12 +183,53 @@ func TestHandleNotify_AmountMismatch(t *testing.T) {
 
 	v := &mockVIPService{}
 	h := newNotifyHandler(mock, v)
-	err = h.handleNotify(context.Background(), notifyPayload("OT-1001", "WX-1001", 99))
+	err = h.handleNotify(context.Background(), notifyPayload("OT-1001", "WX-1001", 0))
 	if !errors.Is(err, errNotifyRejected) {
-		t.Fatalf("want errNotifyRejected, got %v", err)
+		t.Fatalf("want errNotifyRejected for non-positive amount, got %v", err)
 	}
 	if v.activateCalls != 0 {
 		t.Fatalf("ActivateVIPWithTx calls = %d, want 0", v.activateCalls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestHandleNotify_ClosedOrderReissued VP-P1-02：订单已被本地关闭但用户完成支付，
+// 补记为 paid 并自动发货，而非告警漏发。
+func TestHandleNotify_ClosedOrderReissued(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("new mock pool: %v", err)
+	}
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM orders WHERE out_trade_no = \\$1").
+		WithArgs("OT-1001").
+		WillReturnRows(orderRows("order-1", "u1", "vip-month-0001", "OT-1001", "closed", 100))
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM orders WHERE out_trade_no = \\$1").
+		WithArgs("OT-1001").
+		WillReturnRows(orderRows("order-1", "u1", "vip-month-0001", "OT-1001", "closed", 100))
+	mock.ExpectExec("UPDATE orders SET").
+		WithArgs("OT-1001", pgtype.Text{String: "WX-1001", Valid: true}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0)) // state='pending' 不命中
+	mock.ExpectQuery("FROM orders WHERE out_trade_no = \\$1").
+		WithArgs("OT-1001").
+		WillReturnRows(orderRows("order-1", "u1", "vip-month-0001", "OT-1001", "closed", 100))
+	mock.ExpectExec("UPDATE orders SET").
+		WithArgs("OT-1001", pgtype.Text{String: "WX-1001", Valid: true}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1)) // closed -> paid 补记
+	mock.ExpectCommit()
+
+	v := &mockVIPService{}
+	h := newNotifyHandler(mock, v)
+	err = h.handleNotify(context.Background(), notifyPayload("OT-1001", "WX-1001", 100))
+	if err != nil {
+		t.Fatalf("closed order paid should be reissued, got: %v", err)
+	}
+	if v.activateCalls != 1 || v.activateUID != "u1" {
+		t.Fatalf("ActivateVIPWithTx calls = %d (uid=%q), want 1 (u1)", v.activateCalls, v.activateUID)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
@@ -204,5 +280,25 @@ func TestHandleNotify_QueryDBError(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestValidReceiveID VP-P2-03：receive_id 校验（未配置时跳过）。
+func TestValidReceiveID(t *testing.T) {
+	cases := []struct {
+		expected string
+		got      string
+		want     bool
+	}{
+		{"wxappid", "wxappid", true},
+		{"wxappid", "otherapp", false},
+		{"", "anything", true},
+		{"  ", "anything", true},
+		{" wxappid ", "wxappid", true},
+	}
+	for _, c := range cases {
+		if got := validReceiveID(c.expected, c.got); got != c.want {
+			t.Fatalf("validReceiveID(%q, %q) = %v, want %v", c.expected, c.got, got, c.want)
+		}
 	}
 }

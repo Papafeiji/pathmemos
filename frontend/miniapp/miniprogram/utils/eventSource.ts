@@ -95,6 +95,10 @@ export function eventSource(params: EventSourceParams) {
           buffer += tail;
         }
         if (buffer.trim()) processBuffer();
+        // 流正常结束：末尾可能缺少空行终止符，残留 buffer 即最后一条完整消息，需按消息处理，避免丢末段。
+        const remainder = buffer.trim();
+        buffer = '';
+        if (remainder) processMessage(remainder);
         _safeCallback(onclose);
         cleanupListeners();
       },
@@ -158,8 +162,13 @@ export function eventSource(params: EventSourceParams) {
       let error = new Error(dataText || i18n.t('error.aiServiceError'));
       try {
         const parsed = JSON.parse(dataText);
-        if (parsed && parsed.bizCode) {
-          (error as any).bizCode = parsed.bizCode;
+        // 后端 SSE error 体为 {code, biz_code, message}（ADR-0008），兼容历史 bizCode 写法。
+        const bizCode = parsed?.biz_code || parsed?.bizCode;
+        if (bizCode) {
+          (error as any).bizCode = bizCode;
+        }
+        if (parsed && parsed.code) {
+          (error as any).code = parsed.code;
         }
         if (parsed && parsed.message) {
           error.message = parsed.message;

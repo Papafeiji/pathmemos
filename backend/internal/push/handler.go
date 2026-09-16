@@ -44,7 +44,8 @@ func (h *Handler) RecordSubscribe(w http.ResponseWriter, r *http.Request) {
 		msg := "invalid request body"
 		var maxBytesErr *http.MaxBytesError
 		if stderrors.As(err, &maxBytesErr) {
-			msg = "request body too large"
+			middleware.JSONError(w, r, http.StatusRequestEntityTooLarge, errors.CodeRequestEntityTooLarge, "request body too large")
+			return
 		}
 		middleware.JSONError(w, r, status, code, msg)
 		return

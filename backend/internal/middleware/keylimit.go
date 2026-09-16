@@ -46,7 +46,7 @@ func (l *KeyRateLimiter) Allow(r *http.Request) bool {
 func (l *KeyRateLimiter) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !l.allow(r) {
-			JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "too many requests")
+			JSONBizError(w, r, errors.BizRateLimited, "too many requests")
 			return
 		}
 		next.ServeHTTP(w, r)

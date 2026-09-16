@@ -16,11 +16,11 @@ import (
 	"papafeiji/backend/internal/db/sqlc"
 	"papafeiji/backend/internal/file"
 	"papafeiji/backend/internal/pkg/safe"
+	"papafeiji/backend/internal/purge"
 	"papafeiji/backend/internal/push"
 	"papafeiji/backend/pkg/timeutil"
 
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -31,38 +31,41 @@ const (
 	lockCleanupTrajectories   = "lock:background:cleanup_trajectories"
 	lockCleanupOrphanFiles    = "lock:background:cleanup_orphan_files"
 	lockCleanupOrphanTrajMaps = "lock:background:cleanup_orphan_traj_maps"
+	lockCleanupClientOpsLogs  = "lock:background:cleanup_client_ops_logs"
 	lockCommonAddressSummary  = "lock:background:common_address_summary"
-
-	// 后台任务锁 TTL 固定为 120s，与 maxDuration 解耦；续期 goroutine 负责在任务运行期间保持锁。
-	// 按 5.19「TTL 选型原则（简单优先）」，锁靠 Redis TTL 自然过期，进程崩溃后最长 120s 可重新获取。
-	backgroundJobLockTTL = 120 * time.Second
+	lockPurgeDeletedObjects   = "lock:background:purge_deleted_objects"
 )
+
+// maxPurgeBatchesPerRun 单轮最多刷新批数（20 × purge.MaxBatch = 1 万 URL/轮），其余留待下轮。
+const maxPurgeBatchesPerRun = 20
 
 type Runner struct {
 	pool        *db.Pool
 	bgPool      *db.Pool
-	rdb         *redis.Client
-	lock        *db.Lock
+	lock        db.Locker
 	autoService *autorecord.Service
 	pushService *push.Service
 	storage     *file.Storage
 	cfg         *config.Config
+	purgeQueue  *purge.Queue
+	purger      *purge.Purger
 	wg          sync.WaitGroup
 	cancel      context.CancelFunc
 	tickersMu   sync.Mutex
 	tickers     []*time.Ticker
 }
 
-func NewRunner(pool, bgPool *db.Pool, rdb *redis.Client, autoService *autorecord.Service, storage *file.Storage, pushService *push.Service, cfg *config.Config) *Runner {
+func NewRunner(pool, bgPool *db.Pool, autoService *autorecord.Service, storage *file.Storage, pushService *push.Service, cfg *config.Config, purgeQueue *purge.Queue, purger *purge.Purger) *Runner {
 	return &Runner{
 		pool:        pool,
 		bgPool:      bgPool,
-		rdb:         rdb,
-		lock:        db.NewLock(rdb),
+		lock:        db.NewAdvisoryLock(bgPool.PGX()),
 		autoService: autoService,
 		pushService: pushService,
 		storage:     storage,
 		cfg:         cfg,
+		purgeQueue:  purgeQueue,
+		purger:      purger,
 	}
 }
 
@@ -75,9 +78,11 @@ func (r *Runner) Start(ctx context.Context) {
 	r.schedule(ctx, r.interval(r.cfg.JobIntervalOrderClose, time.Minute), 5*time.Minute, lockOrderClose, r.runOrderClose)
 	r.schedule(ctx, r.interval(r.cfg.JobIntervalCleanupAILogs, 24*time.Hour), 10*time.Minute, lockCleanupAILogs, r.runCleanupAILogs)
 	r.schedule(ctx, r.interval(r.cfg.JobIntervalCleanupTrajectories, 6*time.Hour), 10*time.Minute, lockCleanupTrajectories, r.runCleanupTrajectories)
+	r.schedule(ctx, r.interval(r.cfg.JobIntervalCleanupClientOpsLogs, 24*time.Hour), 10*time.Minute, lockCleanupClientOpsLogs, r.runCleanupClientOpsLogs)
 	r.schedule(ctx, r.interval(r.cfg.JobIntervalCleanupOrphanFiles, 7*24*time.Hour), 30*time.Minute, lockCleanupOrphanFiles, r.runCleanupOrphanFiles)
 	r.schedule(ctx, r.interval(r.cfg.JobIntervalCleanupOrphanTrajMaps, 7*24*time.Hour), 10*time.Minute, lockCleanupOrphanTrajMaps, r.runCleanupOrphanTrajMaps)
 	r.scheduleDailyAt(ctx, 3, 0, 30*time.Minute, lockCommonAddressSummary, r.runCommonAddressSummary)
+	r.schedule(ctx, r.interval(r.cfg.JobIntervalPurgeDeletedObjects, 24*time.Hour), 10*time.Minute, lockPurgeDeletedObjects, r.runPurgeDeletedObjects)
 }
 
 func (r *Runner) interval(cfgValue, def time.Duration) time.Duration {
@@ -201,7 +206,8 @@ func (r *Runner) runTask(ctx context.Context, lockKey string, maxDuration time.D
 	defer cancel()
 
 	if lockKey != "" {
-		ok, token, err := r.lock.TryLock(ctx, lockKey, backgroundJobLockTTL)
+		// advisory lock 为会话级锁：无 TTL，进程崩溃随连接断开自动释放，无需续期。
+		ok, token, err := r.lock.TryLock(ctx, lockKey)
 		if err != nil {
 			slog.ErrorContext(ctx, "background job lock error", slog.String("lock_key", lockKey), slog.Any("error", err))
 			return
@@ -209,83 +215,22 @@ func (r *Runner) runTask(ctx context.Context, lockKey string, maxDuration time.D
 		if !ok {
 			return
 		}
-		//nolint:errcheck
-		defer r.lock.Unlock(context.WithoutCancel(ctx), lockKey, token)
-
-		// 任务执行可能接近或超过 maxDuration，启动续期防止锁提前释放导致多实例并发。
-		// 续期带总时长上限（maxDuration + 2×TTL 缓冲）：任务卡死且不响应取消时，
-		// 续期到期停止、锁自然过期，其他实例可接管，避免永久持锁。
-		extendCtx, stopExtend := context.WithTimeout(ctx, maxDuration+2*backgroundJobLockTTL)
-		defer stopExtend()
-		extendFailed := make(chan struct{}, 1)
-		safe.GoWithRecover(extendCtx, nil, func() error {
-			// 在 TTL 的 80% 处触发续期。
-			ticker := time.NewTicker(backgroundJobLockTTL * 8 / 10)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-extendCtx.Done():
-					return nil
-				case <-ticker.C:
-					if ok, err := r.lock.Extend(extendCtx, lockKey, token, backgroundJobLockTTL); err != nil || !ok {
-						slog.Error("background job extend lock failed", slog.String("lock_key", lockKey), slog.Any("error", err))
-						select {
-						case extendFailed <- struct{}{}:
-						default:
-						}
-						return nil
-					}
-				}
-			}
-		}, func(panicErr error) {
-			slog.Error("background job extend goroutine panicked", slog.String("lock_key", lockKey), slog.Any("error", panicErr))
-			select {
-			case extendFailed <- struct{}{}:
-			default:
-			}
-		})
-
-		// 任务 goroutine 绑定到可取消的 context；锁续期失败时立即 cancel，避免锁过期后
-		// 任务仍在执行导致多实例并发或资源泄漏。
-		workerCtx, cancelWorker := context.WithCancel(taskCtx)
-		defer cancelWorker()
-
-		done := make(chan error, 1)
-		start := time.Now()
-		safe.GoWithRecover(workerCtx, nil, func() error {
-			done <- fn(workerCtx)
-			return nil
-		}, func(panicErr error) {
-			done <- panicErr
-		})
-
-		select {
-		case <-extendFailed:
-
-			cancelWorker()
-			// 有界等待任务 goroutine 退出（最长 30s）：任务不响应取消时不再无限阻塞，
-			// 剩余资源随 workerCtx 超时自然释放；锁由上面的续期上限保证到期。
-			select {
-			case <-done:
-			case <-time.After(30 * time.Second):
-				slog.Error("background job worker did not exit after lock extend failure", slog.String("lock_key", lockKey))
-			}
-			return
-		case err := <-done:
-			elapsed := time.Since(start)
-			if elapsed > maxDuration*8/10 {
-				slog.Warn("background job slow", slog.String("lock_key", lockKey), slog.Duration("elapsed", elapsed), slog.Duration("max_duration", maxDuration))
-			}
-			if err != nil {
-				slog.Error("background job failed", slog.String("lock_key", lockKey), slog.Any("error", err))
-				return
-			}
-		}
-		return
+		defer func() {
+			//nolint:errcheck
+			r.lock.Unlock(context.WithoutCancel(ctx), lockKey, token)
+		}()
 	}
 
+	done := make(chan error, 1)
 	start := time.Now()
-	if err := fn(taskCtx); err != nil {
+	safe.GoWithRecover(taskCtx, nil, func() error {
+		done <- fn(taskCtx)
+		return nil
+	}, func(panicErr error) {
+		done <- panicErr
+	})
+
+	if err := <-done; err != nil {
 		elapsed := time.Since(start)
 		if elapsed > maxDuration*8/10 {
 			slog.Warn("background job slow", slog.String("lock_key", lockKey), slog.Duration("elapsed", elapsed), slog.Duration("max_duration", maxDuration))
@@ -477,63 +422,27 @@ func (r *Runner) runOrderClose(ctx context.Context) error {
 const cleanupBatchSize = 1000
 
 func (r *Runner) runCleanupAILogs(ctx context.Context) error {
-	// B5-18：本周期内已失败的用户集合，分页边界重复出现时不再重试。
-	// 跨周期跳过不做——失败多为瞬时故障，跨周期跳过会永久放弃清理；
-	// 持续失败用户每轮仅重查一次（低频后台任务，可接受）。
-	failedUsers := make(map[string]struct{})
-
 	for {
 		n, err := r.bgPool.Queries().DeleteOldDialogLogs(ctx, cleanupBatchSize)
 		if err != nil {
 			return err
 		}
 		if n < cleanupBatchSize {
-			break
+			return nil
 		}
 	}
+}
 
+func (r *Runner) runCleanupClientOpsLogs(ctx context.Context) error {
 	for {
-		users, err := r.bgPool.Queries().ListUsersWithExcessDialogLogs(ctx, sqlc.ListUsersWithExcessDialogLogsParams{
-			MinCount:  1000,
-			BatchSize: cleanupBatchSize,
-		})
+		n, err := r.bgPool.Queries().DeleteOldClientOpsLogs(ctx, cleanupBatchSize)
 		if err != nil {
 			return err
 		}
-		if len(users) == 0 {
-			break
-		}
-		processed := 0
-		for _, userID := range users {
-			if _, failed := failedUsers[userID]; failed {
-				continue
-			}
-			processed++
-			for {
-				n, err := r.bgPool.Queries().DeleteExcessDialogLogs(ctx, sqlc.DeleteExcessDialogLogsParams{
-					UserID:      userID,
-					OffsetCount: 1000,
-					BatchSize:   cleanupBatchSize,
-				})
-				if err != nil {
-					slog.ErrorContext(ctx, "delete excess dialog logs failed", slog.String("user_id", userID), slog.Any("error", err))
-					failedUsers[userID] = struct{}{}
-					break
-				}
-				if n < cleanupBatchSize {
-					break
-				}
-			}
-		}
-		// 本页无任何新进展（全部为持续失败用户）时退出，避免死循环到 ctx 超时。
-		if processed == 0 {
-			break
-		}
-		if len(users) < int(cleanupBatchSize) {
-			break
+		if n < cleanupBatchSize {
+			return nil
 		}
 	}
-	return nil
 }
 
 func (r *Runner) runCleanupTrajectories(ctx context.Context) error {
@@ -636,4 +545,41 @@ func (r *Runner) runCleanupOrphanTrajMaps(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// runPurgeDeletedObjects 已删对象边缘缓存批量收敛（ADR-0013）：
+// 从 Redis 队列分批取 URL 调阿里云 CDN 刷新；未启用（CDNRefreshEnabled=false）时空跑。
+func (r *Runner) runPurgeDeletedObjects(ctx context.Context) error {
+	if r.purgeQueue == nil || r.purger == nil {
+		return nil
+	}
+	purged := 0
+	for batch := 0; batch < maxPurgeBatchesPerRun; batch++ {
+		urls, err := r.purgeQueue.Pop(ctx, purge.MaxBatch)
+		if err != nil {
+			return fmt.Errorf("pop purge queue: %w", err)
+		}
+		if len(urls) == 0 {
+			break
+		}
+		if err := r.purger.Purge(ctx, urls); err != nil {
+			// 刷新失败把本批放回队列，等待下一轮；本轮终止（上游大概率仍故障）。
+			if rbErr := r.purgeQueue.PushBack(ctx, urls); rbErr != nil {
+				slog.ErrorContext(ctx, "push back purge urls failed", slog.Int("count", len(urls)), slog.Any("error", rbErr))
+			}
+			return fmt.Errorf("cdn purge: %w", err)
+		}
+		purged += len(urls)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	if purged > 0 {
+		if n, err := r.purgeQueue.Len(ctx); err == nil {
+			slog.InfoContext(ctx, "purge deleted objects round", slog.Int("purged", purged), slog.Int64("pending", n))
+		}
+	}
+	return nil
 }

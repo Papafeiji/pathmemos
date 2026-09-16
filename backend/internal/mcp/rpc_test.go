@@ -12,7 +12,7 @@ import (
 )
 
 func newInternalRouter(secret string) http.Handler {
-	h := NewHandler(nil, nil, &config.Config{MCPWorkerSecret: secret}, nil)
+	h := NewHandler(nil, &config.Config{MCPWorkerSecret: secret}, nil)
 	r := chi.NewRouter()
 	h.RegisterInternal(r)
 	return r

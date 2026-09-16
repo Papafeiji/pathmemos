@@ -26,7 +26,8 @@ type ClaimUserVIPRowParams struct {
 
 // 并发首次激活竞态防护：GetUserVIPForUpdate 对不存在的行无法加锁，两个并发首次激活
 // 都走 ErrNoRows 创建路径会各自按 now 计算 expire、GREATEST 只保留较大者导致较小档时长丢失。
-// 先 ON CONFLICT DO NOTHING 占位（expire=now），再 FOR UPDATE 重读串行化首次创建。
+// 先 ON CONFLICT DO NOTHING 占位（expire=now+1s，满足 CHECK (expire_time > begin_time)），
+// 再 FOR UPDATE 重读串行化首次创建。
 func (q *Queries) ClaimUserVIPRow(ctx context.Context, arg ClaimUserVIPRowParams) error {
 	_, err := q.db.Exec(ctx, claimUserVIPRow,
 		arg.ID,

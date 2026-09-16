@@ -2,9 +2,7 @@
 import request, { createCancelToken } from '../../utils/request';
 import type { CancelToken } from '../../utils/http';
 import { formatVipInfo } from '../../utils/vip';
-import { openUrl } from '../../utils/util';
 import { logger } from '../../utils/logger';
-import { getHelpBaseURL, EXPORT_GUIDE_URL } from '../../config/index';
 import { getBackendMode } from '../../utils/storage';
 import themeBehavior from '../../behaviors/theme';
 import i18nBehavior from '../../behaviors/i18n';
@@ -43,10 +41,6 @@ Page({
     } else {
       wx.navigateTo({ url });
     }
-  },
-
-  _openWeb(url: string) {
-    openUrl(url);
   },
 
   async onShow() {
@@ -100,15 +94,6 @@ Page({
 
   toInvite() {
     (this as any)._navigateTo('/pages/Invite/Invite');
-  },
-
-  toExport() {
-    // 链接集中在 config 维护（运营替换笔记时无需改页面代码）。
-    (this as any)._openWeb(EXPORT_GUIDE_URL);
-  },
-
-  toChat() {
-    (this as any)._openWeb(`${getHelpBaseURL()}/tutorial/about/`);
   },
 
   toMcp() {

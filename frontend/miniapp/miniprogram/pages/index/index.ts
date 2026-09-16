@@ -34,7 +34,6 @@ Page({
   behaviors: [themeBehavior, i18nBehavior],
   data: {
     list: [] as DiaryCard[],
-    count: 0,
     isLogin: false,
     isScrollTop: true,
     loading: false,
@@ -288,7 +287,7 @@ Page({
     try {
       this.cursorDate = '';
       this.finishedLoad = false;
-      (this as any)._safeSetData({ list: [], count: 0, loading: false });
+      (this as any)._safeSetData({ list: [], loading: false });
 
       const isLogin = await this.ensureLogin((this as any)._loginCancelToken);
       if (!isLogin || (this as any)._isDestroyed) return false;
@@ -406,7 +405,7 @@ Page({
       if (this.cursorDate) {
         params.cursorDate = this.cursorDate;
       }
-      const { data, count, nextCursor } = await request.get('/diary/info', { params, cancelToken: cancelToken! }, true);
+      const { data, nextCursor } = await request.get('/diary/info', { params, cancelToken: cancelToken! }, true);
       const mappedData = data || [];
 
       this.finishedLoad = !nextCursor;
@@ -416,7 +415,6 @@ Page({
         // 下拉刷新：整体替换第一页（首屏至多 PAGE_SIZE 条，单次 setData 数组远小于阈值）。
         (this as any)._safeSetData({
           list: mappedData,
-          count: typeof count === 'number' ? count : 0,
           loading: false,
         });
         return;
@@ -429,7 +427,6 @@ Page({
         this.finishedLoad = true;
         const start = this.data.list.length;
         const updateData: any = {
-          count: typeof count === 'number' ? count : 0,
           loading: false,
         };
         for (let i = 0; start + i < MAX_LIST_SIZE && i < mappedData.length; i++) {
@@ -439,7 +436,6 @@ Page({
       } else {
         const start = this.data.list.length;
         const updateData: any = {
-          count: typeof count === 'number' ? count : 0,
           loading: false,
         };
         mappedData.forEach((item: DiaryCard, i: number) => {

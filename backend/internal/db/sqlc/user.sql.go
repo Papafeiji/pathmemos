@@ -29,6 +29,35 @@ func (q *Queries) BatchUpdateUsersCurrentFamilyToPersonal(ctx context.Context, a
 	return err
 }
 
+const bindUserPhoneIfAllowed = `-- name: BindUserPhoneIfAllowed :execrows
+UPDATE users
+SET phone_number = $2, phone_bind_time = $3, updated_at = now()
+WHERE id = $1
+  AND (phone_bind_time IS NULL OR (phone_bind_time AT TIME ZONE 'Asia/Shanghai')::date <> $4::date)
+`
+
+type BindUserPhoneIfAllowedParams struct {
+	ID            string             `json:"id"`
+	PhoneNumber   pgtype.Text        `json:"phoneNumber"`
+	PhoneBindTime pgtype.Timestamptz `json:"phoneBindTime"`
+	Today         pgtype.Date        `json:"today"`
+}
+
+// A-FIX-03：绑定手机号的原子日限——仅当 phone_bind_time 为空或不在今天（上海时区）时写入，
+// 避免「检查-再更新」竞态下并发绑定绕过日限、反复消耗微信认证额度。解绑走 UpdateUserPhone 不受此限。
+func (q *Queries) BindUserPhoneIfAllowed(ctx context.Context, arg BindUserPhoneIfAllowedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, bindUserPhoneIfAllowed,
+		arg.ID,
+		arg.PhoneNumber,
+		arg.PhoneBindTime,
+		arg.Today,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (
     id, open_id, unionid, phone_number, avatar, avatar_file_id, nickname,

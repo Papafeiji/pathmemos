@@ -116,9 +116,11 @@ Page({
         // 服务端已删除账号，后续本地清理、提示、跳转均为 best-effort，
         // 任一环节失败也不应回退“已注销”事实或误导用户。
         try {
+          // PPJ-A03：本地清理必须执行，不能因页面隐藏/销毁而跳过（否则残留 session 与
+          // 本地数据）；仅成功 toast 等 UI 反馈在页面不可见时省略。
+          await closeAutoRecord().catch(() => {});
+          clearUserData();
           if (!(this as any)._isDestroyed && !(this as any)._isHidden) {
-            await closeAutoRecord().catch(() => {});
-            clearUserData();
             wx.showToast({ title: (this as any).$t('about.deleteAccount'), icon: 'success' });
           }
         } catch (cleanupErr) {

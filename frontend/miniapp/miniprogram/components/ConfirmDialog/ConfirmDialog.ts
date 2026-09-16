@@ -70,16 +70,6 @@ Component({
     onInput(e: any) {
       this.triggerEvent('input', { value: e.detail.value });
     },
-    onCopy() {
-      const value = this.data.inputDisplayValue || this.data.inputValue;
-      if (!value) return;
-      wx.setClipboardData({
-        data: value,
-        success: () => {
-          wx.showToast({ title: (this as any).$t('common.copied'), icon: 'none' });
-        },
-      });
-    },
   },
 
   pageLifetimes: {

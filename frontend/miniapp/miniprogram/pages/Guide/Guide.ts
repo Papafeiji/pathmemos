@@ -12,8 +12,6 @@ Page({
   behaviors: [themeBehavior, i18nBehavior],
   data: {
     step: 0,
-    showEditDrawer: false,
-    showAIDrawer: false,
     images: [
       `${OSS_TUTORIAL}/guide-1.png`,
       `${OSS_TUTORIAL}/guide-2.png`,
@@ -42,7 +40,6 @@ Page({
   },
 
   onUnload() {
-    (this as any)._forceSetData({ showEditDrawer: false, showAIDrawer: false });
     (this as any)._isDestroyed = true;
     (this as any)._isHidden = true;
     (this as any).unsubscribeTheme?.();
@@ -50,17 +47,10 @@ Page({
 
   onHide() {
     (this as any)._isHidden = true;
-    // 编辑抽屉在 onHide 中保留，避免系统调用触发 onHide 后返回抽屉消失；
-    // 仅在 onUnload 中关闭。AI 抽屉可关闭。
-    (this as any)._forceSetData({ showAIDrawer: false });
   },
 
   toUser() {
     wx.navigateTo({ url: '/pages/User/User' });
-  },
-
-  toIndex() {
-    wx.redirectTo({ url: '/pages/index/index' });
   },
 
   next() {
@@ -88,17 +78,5 @@ Page({
     if (this.data.step > 0) {
       (this as any)._safeSetData({ step: this.data.step - 1 });
     }
-  },
-
-  doShowEditDrawer() {
-    (this as any)._safeSetData({ showEditDrawer: true });
-  },
-
-  hiddenEditDrawer() {
-    (this as any)._safeSetData({ showEditDrawer: false });
-  },
-
-  hiddenAIDrawer() {
-    (this as any)._safeSetData({ showAIDrawer: false });
   },
 });

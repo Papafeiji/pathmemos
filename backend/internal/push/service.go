@@ -56,7 +56,7 @@ func NewService(pool *db.Pool, cfg *config.Config, rdb *goredis.Client, wxMPClie
 }
 
 // SendAbnormalAlert sends abnormal alert through official account and mini-program channels.
-// 每天最多一次；先原子标记今日已发送，再推送。服务号优先，服务号失败时降级小程序。
+// 每天最多一次；先原子标记今日已发送，再推送。服务号与小程序双通道并发独立尝试（02g D7）。
 // 推送本身为尽力而为，发送失败不撤销已记账的标记（宁可漏报不重报）。
 func (s *Service) SendAbnormalAlert(ctx context.Context, userID string) error {
 	now := timeutil.NowShanghai()

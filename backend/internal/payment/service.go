@@ -209,16 +209,28 @@ func (h *Handler) handleNotify(ctx context.Context, payload map[string]interface
 	}
 	if !amountOK {
 		slog.ErrorContext(ctx, "notify amount missing or unparsable",
+			slog.String("alert", "payment_notify_amount_missing"),
 			slog.String("out_trade_no", outTradeNo),
 			slog.Int64("order_amount", int64(order.Amount)))
 		return fmt.Errorf("%w: amount missing", errNotifyRejected)
 	}
-	if notifyAmount != int64(order.Amount) {
-		slog.ErrorContext(ctx, "notify amount mismatch",
+	// VP-P1-01：回调已通过验签，金额不可解析才拒绝。金额与订单标价不一致多来自
+	// 平台立减/优惠券，此时用户已实际扣款，拒绝会静默漏发；按「支付成功即到账」
+	// 照常发货，仅打告警供对账。非正数金额视为异常拒绝。
+	if notifyAmount <= 0 {
+		slog.ErrorContext(ctx, "notify amount invalid, rejected",
+			slog.String("alert", "payment_notify_amount_invalid"),
 			slog.String("out_trade_no", outTradeNo),
 			slog.Int64("order_amount", int64(order.Amount)),
 			slog.Int64("notify_amount", notifyAmount))
-		return fmt.Errorf("%w: amount mismatch", errNotifyRejected)
+		return fmt.Errorf("%w: invalid amount", errNotifyRejected)
+	}
+	if notifyAmount != int64(order.Amount) {
+		slog.ErrorContext(ctx, "payment notify amount mismatch, delivering anyway",
+			slog.String("alert", "payment_notify_amount_mismatch"),
+			slog.String("out_trade_no", outTradeNo),
+			slog.Int64("order_amount", int64(order.Amount)),
+			slog.Int64("notify_amount", notifyAmount))
 	}
 
 	err = db.WithTx(ctx, h.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
@@ -258,14 +270,33 @@ func (h *Handler) handleNotify(ctx context.Context, payload map[string]interface
 			}
 			// 订单已非 pending：paid 为已发货的幂等重试，正常返回成功。
 			// closed 表示订单被关闭后才完成支付（取消竞态/后台任务关闭超时 pending 后仍支付成功），
-			// 微信已扣款但未发货：返回非 2xx 触发微信持续重试，并打 alert 供监控人工补发。
+			// 微信已扣款，不能漏发：VP-P1-02 将 closed 补记为 paid 并自动发货。
 			if currentOrder.State == "closed" && !isUserDeleted {
-				slog.ErrorContext(ctx, "payment notify for closed order: paid but not delivered",
-					slog.String("alert", "payment_notify_closed_order_unfulfilled"),
+				rows2, err2 := q.MarkClosedOrderPaid(ctx, sqlc.MarkClosedOrderPaidParams{
+					OutTradeNo:    outTradeNo,
+					TransactionID: pgtype.Text{String: transactionID, Valid: true},
+				})
+				if err2 != nil {
+					var pgErr *pgconn.PgError
+					if errors.As(err2, &pgErr) && pgErr.Code == "23505" {
+						return fmt.Errorf("%w: mark closed order paid: %v", errNotifyRejected, err2)
+					}
+					return fmt.Errorf("mark closed order paid: %w", err2)
+				}
+				if rows2 == 0 {
+					slog.WarnContext(ctx, "closed order concurrently handled, skip",
+						slog.String("out_trade_no", outTradeNo))
+					return nil
+				}
+				slog.ErrorContext(ctx, "payment notify for closed order: reissued delivery",
+					slog.String("alert", "payment_notify_closed_order_reissued"),
 					slog.String("out_trade_no", outTradeNo),
 					slog.String("vip_id", currentOrder.VipID),
 					slog.String("transaction_id", transactionID))
-				return fmt.Errorf("order closed before payment notify (paid but not delivered)")
+				if err := h.vipService.ActivateVIPWithTx(ctx, currentOrder.UserID.String, currentOrder.VipID, q); err != nil {
+					return fmt.Errorf("activate vip (closed order): %w", err)
+				}
+				return nil
 			}
 			slog.WarnContext(ctx, "notify for non-pending order", slog.String("out_trade_no", outTradeNo))
 			return nil

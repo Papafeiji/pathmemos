@@ -22,7 +22,6 @@ services:
       - WECHAT_VIRTUAL_CALLBACK_AES_KEY=${WECHAT_VIRTUAL_CALLBACK_AES_KEY:-}
       - TENCENT_MAP_KEY=${TENCENT_MAP_KEY}
       - AI_API_KEY=${AI_API_KEY:-}
-      - AI_PROVIDER=${AI_PROVIDER:-deepseek}
       - AI_BASE_URL=${AI_BASE_URL:-https://api.deepseek.com}
       - AI_MODEL=${AI_MODEL:-deepseek-chat}
       - API_HOST=${API_HOST:-http://localhost:8080}

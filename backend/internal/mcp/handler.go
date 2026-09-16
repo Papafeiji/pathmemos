@@ -42,7 +42,6 @@ const (
 var apiKeyNeverExpires = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 type Handler struct {
-	router          chi.Router
 	pool            *db.Pool
 	cfg             *config.Config
 	baseURL         string
@@ -51,9 +50,8 @@ type Handler struct {
 	rdb             *redis.Client
 }
 
-func NewHandler(router chi.Router, pool *db.Pool, cfg *config.Config, rdb *redis.Client) *Handler {
+func NewHandler(pool *db.Pool, cfg *config.Config, rdb *redis.Client) *Handler {
 	return &Handler{
-		router:  router,
 		pool:    pool,
 		cfg:     cfg,
 		baseURL: apiBaseURL(cfg.APIHost, cfg.HTTPBind, cfg.HTTPPort),
@@ -96,10 +94,8 @@ func apiBaseURL(host string, bind string, port string) string {
 	}
 	baseURL := ""
 	switch port {
-	case "80", "":
+	case "80", "443", "":
 		baseURL = fmt.Sprintf("%s://%s", scheme, addr)
-	case "443":
-		baseURL = fmt.Sprintf("https://%s", addr)
 	default:
 		baseURL = fmt.Sprintf("%s://%s:%s", scheme, addr, port)
 	}
@@ -340,7 +336,7 @@ func (h *Handler) GetDiary(w http.ResponseWriter, r *http.Request) {
 // authenticateMcpQuery 是查询类端点的公共前奏：限流 + API Key 鉴权 + 日期范围与 limit 解析。
 func (h *Handler) authenticateMcpQuery(w http.ResponseWriter, r *http.Request) (key apiKeyInfo, startDate, endDate time.Time, limit int, ok bool) {
 	if !h.rateLimiter.Allow(r) {
-		middleware.JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "too many requests")
+		middleware.JSONBizError(w, r, errors.BizRateLimited, "too many requests")
 		return key, startDate, endDate, limit, false
 	}
 	var err error
@@ -513,7 +509,7 @@ func (h *Handler) CreateMemory(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	if !h.rateLimiter.Allow(r) {
-		middleware.JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "too many requests")
+		middleware.JSONBizError(w, r, errors.BizRateLimited, "too many requests")
 		return
 	}
 	key, err := h.authenticateAPIKey(ctx, extractBearer(r.Header.Get("Authorization")))
@@ -525,7 +521,7 @@ func (h *Handler) CreateMemory(w http.ResponseWriter, r *http.Request) {
 	req, err := parseCreateMemoryRequest(w, r)
 	if err != nil {
 		if err.Error() == "request body too large" {
-			middleware.JSONError(w, r, http.StatusRequestEntityTooLarge, errors.CodeBadRequest, err.Error())
+			middleware.JSONError(w, r, http.StatusRequestEntityTooLarge, errors.CodeRequestEntityTooLarge, err.Error())
 			return
 		}
 		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, err.Error())

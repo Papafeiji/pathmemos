@@ -82,9 +82,21 @@ type Config struct {
 	// 影响 /system/config 返回的功能开关。
 	DeploymentMode string
 
-	// AI 运行时覆盖：若设置，优先于 sys_config 中的 ai_config。
-	AIBaseURL string
-	AIModel   string
+	// AI 运行时配置（原 sys_configs.ai_config）。
+	AIBaseURL      string
+	AIModel        string
+	AIThinkingType string
+	AIMaxTokens    int
+	// AIPrompt 小程序系统提示词（原 sys_configs.ai_prompt）；默认 DefaultAIPrompt。
+	AIPrompt string
+	// WechatMPPrompt 公众号系统提示词（原 sys_configs.sys_config.wechatMpPrompt）；空回退 AIPrompt。
+	WechatMPPrompt string
+	// 默认静态资源（原 sys_configs.sys_config）。
+	DefaultCoverImage     string
+	DefaultTrajectoryIcon string
+	DefaultAvatarURL      string
+	// StoragePublicBaseURL 文件对外基址（原 sys_configs.sys_config.fileBaseUrl）。
+	StoragePublicBaseURL string
 
 	TrustedProxyCIDR string
 
@@ -123,6 +135,12 @@ type Config struct {
 	JobIntervalCleanupTrajectories   time.Duration
 	JobIntervalCleanupOrphanFiles    time.Duration
 	JobIntervalCleanupOrphanTrajMaps time.Duration
+	JobIntervalCleanupClientOpsLogs  time.Duration
+	JobIntervalPurgeDeletedObjects   time.Duration
+
+	// CDNRefreshEnabled 开启已删对象边缘缓存批量收敛（ADR-0013）：删除 OSS 对象时
+	// 记录公开 URL，后台任务定期调用阿里云 CDN 刷新接口。默认关闭。
+	CDNRefreshEnabled bool
 }
 
 func Load() (*Config, error) {
@@ -154,12 +172,25 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	jobIntervalCleanupClientOpsLogs, err := defaultDurationEnv("JOB_INTERVAL_CLEANUP_CLIENT_OPS_LOGS", 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	jobIntervalPurgeDeletedObjects, err := defaultDurationEnv("JOB_INTERVAL_PURGE_DELETED_OBJECTS", 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
 
 	userImageStorageLimitBytes, err := defaultInt64Env("USER_IMAGE_STORAGE_LIMIT_BYTES", 1024*1024*1024)
 	if err != nil {
 		return nil, err
 	}
 	userImageStorageLimitBytesVIP, err := defaultInt64Env("USER_IMAGE_STORAGE_LIMIT_BYTES_VIP", 5*1024*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+
+	aiMaxTokens, err := defaultInt64Env("AI_MAX_OUTPUT_TOKENS", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -200,22 +231,30 @@ func Load() (*Config, error) {
 		OSSBucket:          os.Getenv("OSS_BUCKET"),
 		OSSPublicURL:       os.Getenv("OSS_PUBLIC_URL"),
 
-		HTTPBind:         defaultEnv("HTTP_BIND", "127.0.0.1"),
-		HTTPPort:         defaultEnv("HTTP_PORT", "8080"),
-		SSEBind:          defaultEnv("SSE_BIND", "127.0.0.1"),
-		SSEPort:          defaultEnv("SSE_PORT", "8081"),
-		APIHost:          os.Getenv("API_HOST"),
-		LogLevel:         defaultEnv("LOG_LEVEL", "INFO"),
-		DeploymentMode:   defaultEnv("DEPLOYMENT_MODE", "saas"),
-		AIBaseURL:        defaultEnv("AI_BASE_URL", ""),
-		AIModel:          defaultEnv("AI_MODEL", ""),
-		TrustedProxyCIDR: os.Getenv("TRUSTED_PROXY_CIDR"),
-		WorkerSecret:     os.Getenv("WORKER_SECRET"),
-		MCPWorkerSecret:  os.Getenv("MCP_WORKER_SECRET"),
-		MCPPublicURL:     os.Getenv("MCP_PUBLIC_URL"),
-		MCPEnabled:       boolEnv("MCP_ENABLED", true),
-		OpenAPIKey:       os.Getenv("OPEN_API_KEY"),
-		StorageLocalPath: defaultEnv("STORAGE_LOCAL_PATH", "/opt/pathmemos/uploads"),
+		HTTPBind:              defaultEnv("HTTP_BIND", "127.0.0.1"),
+		HTTPPort:              defaultEnv("HTTP_PORT", "8080"),
+		SSEBind:               defaultEnv("SSE_BIND", "127.0.0.1"),
+		SSEPort:               defaultEnv("SSE_PORT", "8081"),
+		APIHost:               os.Getenv("API_HOST"),
+		LogLevel:              defaultEnv("LOG_LEVEL", "INFO"),
+		DeploymentMode:        defaultEnv("DEPLOYMENT_MODE", "saas"),
+		AIBaseURL:             defaultEnv("AI_BASE_URL", ""),
+		AIModel:               defaultEnv("AI_MODEL", ""),
+		AIThinkingType:        defaultEnv("AI_THINKING_TYPE", ""),
+		AIMaxTokens:           int(aiMaxTokens),
+		AIPrompt:              defaultEnv("AI_PROMPT", DefaultAIPrompt),
+		WechatMPPrompt:        defaultEnv("WECHAT_MP_PROMPT", ""),
+		DefaultCoverImage:     os.Getenv("DEFAULT_COVER_IMAGE"),
+		DefaultTrajectoryIcon: os.Getenv("DEFAULT_TRAJECTORY_ICON"),
+		DefaultAvatarURL:      defaultEnv("DEFAULT_AVATAR_URL", "https://api.dicebear.com/7.x/bottts-neutral/png?seed="),
+		StoragePublicBaseURL:  os.Getenv("STORAGE_PUBLIC_BASE_URL"),
+		TrustedProxyCIDR:      os.Getenv("TRUSTED_PROXY_CIDR"),
+		WorkerSecret:          os.Getenv("WORKER_SECRET"),
+		MCPWorkerSecret:       os.Getenv("MCP_WORKER_SECRET"),
+		MCPPublicURL:          os.Getenv("MCP_PUBLIC_URL"),
+		MCPEnabled:            boolEnv("MCP_ENABLED", true),
+		OpenAPIKey:            os.Getenv("OPEN_API_KEY"),
+		StorageLocalPath:      defaultEnv("STORAGE_LOCAL_PATH", "/opt/pathmemos/uploads"),
 
 		UserImageStorageLimitBytes:    userImageStorageLimitBytes,
 		UserImageStorageLimitBytesVIP: userImageStorageLimitBytesVIP,
@@ -227,6 +266,9 @@ func Load() (*Config, error) {
 		JobIntervalCleanupTrajectories:   jobIntervalCleanupTrajectories,
 		JobIntervalCleanupOrphanFiles:    jobIntervalCleanupOrphanFiles,
 		JobIntervalCleanupOrphanTrajMaps: jobIntervalCleanupOrphanTrajMaps,
+		JobIntervalCleanupClientOpsLogs:  jobIntervalCleanupClientOpsLogs,
+		JobIntervalPurgeDeletedObjects:   jobIntervalPurgeDeletedObjects,
+		CDNRefreshEnabled:                boolEnv("CDN_REFRESH_ENABLED", false),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -321,6 +363,9 @@ func (c *Config) validate() error {
 		if c.WechatVirtualCallbackAESKey == "" {
 			return fmt.Errorf("WECHAT_VIRTUAL_CALLBACK_AES_KEY is required (虚拟支付回调加密密钥)")
 		}
+		if c.WorkerSecret == "" {
+			return fmt.Errorf("WORKER_SECRET is required in saas mode")
+		}
 		// SaaS 模式禁止静默回退内置微信凭据（B1-03）：必须显式配置 WECHAT_APPID/WECHAT_SECRET。
 		// 开源版仍可使用 wechatsecrets 内置凭据，机制保留。
 		if os.Getenv("WECHAT_APPID") == "" {
@@ -329,6 +374,8 @@ func (c *Config) validate() error {
 		if os.Getenv("WECHAT_SECRET") == "" {
 			return fmt.Errorf("WECHAT_SECRET is required in saas mode (内置凭据仅限开源版)")
 		}
+	} else if c.WorkerSecret != "" {
+		return fmt.Errorf("WORKER_SECRET must be empty in open mode")
 	}
 	if c.TrustedProxyCIDR != "" {
 		for _, cidr := range strings.Split(c.TrustedProxyCIDR, ",") {

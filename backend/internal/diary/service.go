@@ -27,7 +27,6 @@ import (
 	"papafeiji/backend/internal/location"
 	"papafeiji/backend/internal/mcp"
 	"papafeiji/backend/internal/pkg/safe"
-	"papafeiji/backend/internal/vip"
 	"papafeiji/backend/pkg/limiter"
 	"papafeiji/backend/pkg/timeutil"
 	"papafeiji/backend/pkg/util"
@@ -38,13 +37,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	dateFormat = "2006-01-02"
-	// coverLockTTL 封面锁 TTL。临界区为纯 DB 操作（评估降级 + upsert 封面记录），亚秒级完成，
-	// 外部 IO（轨迹图生成）已移出锁在释放后异步执行。按 5.19「TTL 选型原则（简单优先）」
-	// 取 120s：既为纯 DB 事务提供充裕余量，又满足 ≤120s 免续期条件，不引入续期 goroutine。
-	coverLockTTL = 120 * time.Second
-)
+const dateFormat = "2006-01-02"
 
 func normalizeDate(s string) (string, error) {
 	s = strings.TrimSpace(s)
@@ -71,6 +64,8 @@ var (
 	ErrRecordTimeCrossDay        = errors.New("record time cannot cross day")
 	ErrCoverUpdateInProgress     = errors.New("cover update in progress")
 	ErrDailyReverseQuotaExceeded = errors.New("daily reverse geocode quota exceeded")
+	// ErrAutoEntryInProgress 表示该用户的自动记录用户锁被后台任务持有，HTTP 入口本次未获取到。
+	ErrAutoEntryInProgress = errors.New("auto entry in progress")
 )
 
 type NewPlaceAlerter interface {
@@ -78,30 +73,26 @@ type NewPlaceAlerter interface {
 }
 
 type Service struct {
-	pool           *db.Pool
-	rdb            *redis.Client
-	lock           *db.Lock
-	vipService     vip.InfoProvider
-	storage        *file.Storage
-	sysCfg         *config.SysConfig
-	tencentMapKeys []string
+	pool    *db.Pool
+	rdb     *redis.Client
+	lock    db.Locker
+	storage *file.Storage
+	sysCfg  *config.SysConfig
 
 	defaultIcon     string
 	loc             *location.Client
 	newPlaceAlerter NewPlaceAlerter
 }
 
-func NewService(pool *db.Pool, rdb *redis.Client, lock *db.Lock, vipService vip.InfoProvider, storage *file.Storage, sysCfg *config.SysConfig, tencentMapKeys []string) *Service {
+func NewService(pool *db.Pool, rdb *redis.Client, lock db.Locker, storage *file.Storage, sysCfg *config.SysConfig, tencentMapKeys []string) *Service {
 	return &Service{
-		pool:           pool,
-		rdb:            rdb,
-		lock:           lock,
-		vipService:     vipService,
-		storage:        storage,
-		sysCfg:         sysCfg,
-		tencentMapKeys: tencentMapKeys,
-		defaultIcon:    sysCfg.DefaultTrajectoryIcon,
-		loc:            location.NewClient(tencentMapKeys),
+		pool:        pool,
+		rdb:         rdb,
+		lock:        lock,
+		storage:     storage,
+		sysCfg:      sysCfg,
+		defaultIcon: sysCfg.DefaultTrajectoryIcon,
+		loc:         location.NewClient(tencentMapKeys),
 	}
 }
 
@@ -831,7 +822,7 @@ func (s *Service) UpdateCover(ctx context.Context, userID, familyID, recordDate 
 	}
 
 	coverLockKey := fmt.Sprintf("lock:covers:%s:%s", familyID, recordDate)
-	ok, coverLockToken, err := s.lock.TryLock(ctx, coverLockKey, coverLockTTL)
+	ok, coverLockToken, err := s.lock.TryLock(ctx, coverLockKey)
 	if err != nil {
 		return fmt.Errorf("acquire cover lock: %w", err)
 	}
@@ -839,10 +830,10 @@ func (s *Service) UpdateCover(ctx context.Context, userID, familyID, recordDate 
 		return ErrCoverUpdateInProgress
 	}
 	// 封面锁临界区仅为纯 DB 操作（评估降级 + upsert 封面记录），亚秒级完成；轨迹图生成等
-	// 外部 IO 已移出锁在释放后异步执行。按 5.19「TTL 选型原则（简单优先）」，纯 DB 临界区
-	// 使用 TTL ≤120s 免除续期，不引入续期 goroutine。
+	// 外部 IO 已移出锁在释放后异步执行。advisory lock 无 TTL、连接断开自动释放，
+	// 不引入续期机制。
 	// 必须在锁释放后再启动异步封面刷新，否则 goroutine 会因锁仍被占用而直接失败
-	//（AGENTS.md §3.8「异步触发轨迹图生成必须在分布式锁释放之后」）。
+	//（02b D4「轨迹图生成等外部 IO 必须在锁释放后执行」）。
 	needAsyncRefresh := false
 	var trajectoryFilesToDelete []sqlc.FindTrajectoryCoversRow
 	defer func() {
@@ -1022,9 +1013,9 @@ func (s *Service) DeleteDiary(ctx context.Context, userID, familyID, recordDate 
 		}); err != nil {
 			return fmt.Errorf("delete memories: %w", err)
 		}
-		// 在事务内先锁定日记行、再删除图片关联并返回 file_id，最后删除日记。
-		// FOR UPDATE 阻止并发创建条目，确保返回的 file_id 与实际被级联删除的图片完全一致，
-		// 避免并发新增的图片条目被级联删除但其 fileID 未清理封面引用。
+		// 在事务内删除图片关联并返回 file_id，再删除日记。
+		// 注意：当前 SQL 未加 SELECT ... FOR UPDATE 行锁，并发新增的图片条目可能在删除后成为孤儿；
+		// 孤儿文件由后台孤儿清理任务兜底（DA-P2-01：原注释误称有行锁，已按实现更正）。
 		fileIDs, err = q.DeleteDiaryImagesReturningFileIDs(ctx, diaryID.ID)
 		if err != nil {
 			return fmt.Errorf("delete diary images: %w", err)
@@ -1081,6 +1072,13 @@ func (s *Service) DeleteDiary(ctx context.Context, userID, familyID, recordDate 
 			}
 		})
 	}
+
+	// OPS-LOG：整日删除审计日志（用于数据问题复盘）。
+	slog.InfoContext(ctx, "diary deleted",
+		slog.String("user_id", userID),
+		slog.String("family_id", familyID),
+		slog.String("record_date", recordDate),
+	)
 	return nil
 }
 
@@ -1147,6 +1145,14 @@ func (s *Service) CreateEntry(ctx context.Context, userID string, req *entryRequ
 	if err != nil {
 		return "", "", "", nil, err
 	}
+
+	// OPS-LOG：手动创建条目审计日志（用于数据问题复盘）。
+	slog.InfoContext(ctx, "diary entry created",
+		slog.String("user_id", userID),
+		slog.String("entry_id", newEntryID),
+		slog.String("record_date", recordDate),
+		slog.String("source", "manual"),
+	)
 
 	// 日记新增后异步失效 MCP 查询缓存，失败由 30 分钟 TTL 兜底。
 	safe.Go(context.WithoutCancel(ctx), nil, func() {
@@ -1307,6 +1313,13 @@ func (s *Service) UpdateEntry(ctx context.Context, userID string, req *entryRequ
 			}
 		})
 	}
+	// OPS-LOG：更新条目审计日志（用于数据问题复盘）。
+	slog.InfoContext(ctx, "diary entry updated",
+		slog.String("user_id", userID),
+		slog.String("entry_id", req.ID),
+		slog.String("record_date", recordDate),
+	)
+
 	cards, cardErr := s.ListInfoCardsByDates(ctx, userID, []string{recordDate})
 	if cardErr != nil {
 		slog.WarnContext(ctx, "list info card after update entry failed",
@@ -1356,9 +1369,9 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, entryID string) (fami
 	var oldImageFileIDs []string
 	err = db.WithTx(ctx, s.pool.Pool(), func(ctx context.Context, q *sqlc.Queries) error {
 		var err error
-		// 在事务内锁定条目行、删除图片关联并返回 file_id，最后删除条目。
-		// FOR UPDATE 阻止并发更新条目，确保返回的 file_id 与实际被级联删除的图片完全一致，
-		// 避免并发新增的图片被级联删除但其 fileID 未清理封面引用。
+		// 在事务内删除图片关联并返回 file_id，再删除条目。
+		// 注意：当前 SQL 未加 SELECT ... FOR UPDATE 行锁，并发新增的图片可能在删除后成为孤儿；
+		// 孤儿文件由后台孤儿清理任务兜底（DA-P2-01：原注释误称有行锁，已按实现更正）。
 		oldImageFileIDs, err = q.DeleteDiaryEntryImagesReturningFileIDs(ctx, entryID)
 		if err != nil {
 			return fmt.Errorf("delete diary entry images: %w", err)
@@ -1412,6 +1425,9 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, entryID string) (fami
 		return "", "", err
 	}
 
+	// MCP 查询缓存含日记条目与回忆，删除后必须失效，避免 30 分钟 TTL 内 MCP 端仍能读到已删条目。
+	mcp.InvalidateUserCache(context.WithoutCancel(ctx), s.rdb, userID)
+
 	safe.Go(ctx, nil, func() {
 		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
@@ -1432,7 +1448,34 @@ func (s *Service) DeleteEntry(ctx context.Context, userID, entryID string) (fami
 			}
 		})
 	}
+
+	// OPS-LOG：删除条目审计日志（用于数据问题复盘）。
+	slog.InfoContext(ctx, "diary entry deleted",
+		slog.String("user_id", userID),
+		slog.String("entry_id", entryID),
+		slog.String("record_date", recordDate),
+	)
 	return familyID, recordDate, nil
+}
+
+// acquireAutoEntryLock 以有限重试获取自动记录用户锁（与后台 autorecord.processUser 同键）。
+// 返回空 token 表示锁被占用（后台正在处理该用户）；有限重试约 2s，避免用户请求长时间挂起。
+func (s *Service) acquireAutoEntryLock(ctx context.Context, key string) (string, error) {
+	for i := 0; i < 10; i++ {
+		ok, token, err := s.lock.TryLock(ctx, key)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return token, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return "", nil
 }
 
 func (s *Service) CreateAutoEntry(ctx context.Context, userID string, lat, lon float64) (entryID, familyID, recordDate string, err error) {
@@ -1460,6 +1503,24 @@ func (s *Service) CreateAutoEntry(ctx context.Context, userID string, lat, lon f
 	familyID, _, err = s.GetFamilyMembers(ctx, userID)
 	if err != nil {
 		return "", "", "", err
+	}
+
+	// DA-P1-04：与后台 autorecord.processUser 共用 lock:auto_record:{userID}，
+	// 避免 HTTP 入口与后台任务并发对同一驻留点各生成一条自动条目。
+	if s.lock != nil {
+		lockKey := "lock:auto_record:" + userID
+		lockToken, lockErr := s.acquireAutoEntryLock(ctx, lockKey)
+		if lockErr != nil {
+			return "", "", "", fmt.Errorf("acquire auto entry lock: %w", lockErr)
+		}
+		if lockToken == "" {
+			return "", "", "", ErrAutoEntryInProgress
+		}
+		defer func() {
+			if uerr := s.lock.Unlock(context.WithoutCancel(ctx), lockKey, lockToken); uerr != nil {
+				slog.ErrorContext(ctx, "auto entry unlock failed", slog.String("user_id", userID), slog.Any("error", uerr))
+			}
+		}()
 	}
 
 	lastID, dup, err := autorecord.IsSameAsLastAutoEntry(ctx, s.pool, userID, landmark, address, recordDateTime, nil)
@@ -1518,6 +1579,18 @@ func (s *Service) CreateAutoEntry(ctx context.Context, userID string, lat, lon f
 		return "", "", "", err
 	}
 
+	// 自动成文同样影响 MCP 日记/回忆查询，失效缓存避免 MCP 端看不到刚生成的记录。
+	mcp.InvalidateUserCache(context.WithoutCancel(ctx), s.rdb, userID)
+
+	// OPS-LOG：自动记录条目创建审计日志（用于数据问题复盘）。
+	slog.InfoContext(ctx, "diary auto entry created",
+		slog.String("user_id", userID),
+		slog.String("entry_id", newEntryID),
+		slog.String("record_date", recordDate),
+		slog.Float64("lat", lat),
+		slog.Float64("lon", lon),
+	)
+
 	s.refreshCoverAsync(familyID, recordDate)
 	if s.newPlaceAlerter != nil {
 		safe.Go(ctx, nil, func() {
@@ -1543,14 +1616,23 @@ func (s *Service) reverseGeocode(ctx context.Context, lat, lon float64) (landmar
 	if err != nil {
 		return "", "", err
 	}
-	if res.Address == "" {
-		return "", "", fmt.Errorf("reverse geocode returned empty address")
+	landmark, address, ok := pickGeocodeResult(res)
+	if !ok {
+		// DA-P2-03：只有 POI 与地址都为空才是真正的上游空结果；地址空但 POI 非空时
+		// 仍按 landmark 成文（与后台 autorecord 路径一致），避免首次即时成文 500。
+		return "", "", fmt.Errorf("reverse geocode returned empty landmark and address")
 	}
+	return landmark, address, nil
+}
+
+// pickGeocodeResult 从逆地理结果中挑出用于成文的 landmark 与 address：
+// landmark 优先 POI，回退地址；两者都空返回 ok=false。纯函数便于单测。
+func pickGeocodeResult(res *location.ReverseResult) (landmark, address string, ok bool) {
 	landmark = res.Landmark
 	if landmark == "" {
 		landmark = res.Address
 	}
-	return landmark, res.Address, nil
+	return landmark, res.Address, landmark != ""
 }
 
 func (s *Service) validateImageFiles(ctx context.Context, fileIDs []string, userID string) ([]pgtype.Text, error) {
@@ -1681,7 +1763,7 @@ func (s *Service) refreshFamilyDailyCover(ctx context.Context, familyID, recordD
 	}
 
 	coverLockKey := fmt.Sprintf("lock:covers:%s:%s", familyID, recordDate)
-	ok, coverLockToken, err := s.lock.TryLock(ctx, coverLockKey, coverLockTTL)
+	ok, coverLockToken, err := s.lock.TryLock(ctx, coverLockKey)
 	if err != nil {
 		return false, fmt.Errorf("acquire cover lock: %w", err)
 	}
@@ -1689,8 +1771,8 @@ func (s *Service) refreshFamilyDailyCover(ctx context.Context, familyID, recordD
 		return false, ErrCoverUpdateInProgress
 	}
 	// 封面锁临界区仅为纯 DB 操作（评估降级 + 写 default/upsert 封面记录），亚秒级完成；
-	// 轨迹图生成（外部 HTTP + 文件落盘）已移出锁在释放后异步执行。按 5.19「TTL 选型原则
-	//（简单优先）」，纯 DB 临界区使用 TTL ≤120s 免除续期，不引入续期 goroutine。
+	// 轨迹图生成（外部 HTTP + 文件落盘）已移出锁在释放后异步执行。advisory lock 无 TTL、
+	// 连接断开自动释放，不引入续期机制。
 	// 轨迹图生成涉及外部 HTTP 调用 + 文件落盘，不可在锁内执行。
 	// 锁内完成评估并写入 default，锁释放后再生成轨迹图并 upsert。
 	needPostLockTrajectory := false
@@ -1965,8 +2047,10 @@ func (s *Service) resolveFamilyDailyCover(ctx context.Context, familyID, recordD
 		RecordDate: recordDateTime,
 	})
 	if err == nil && cover.CoverType != "" {
-		if url, ok, urlErr := s.coverURLFromRow(cover); urlErr != nil {
-			return "", "", urlErr
+		url, ok, urlErr := s.coverURLFromRow(cover)
+		if urlErr != nil {
+			// D9：URL 不可构造即视为封面失效，降级到下方无锁评估，不作为错误上抛。
+			slog.WarnContext(ctx, "build cover url failed", slog.String("family_id", familyID), slog.String("record_date", recordDate), slog.Any("error", urlErr))
 		} else if ok {
 			fileID := ""
 			if cover.CoverFileID.Valid {
@@ -1974,12 +2058,28 @@ func (s *Service) resolveFamilyDailyCover(ctx context.Context, familyID, recordD
 			}
 			return url, fileID, nil
 		}
-		switch cover.CoverType {
-		case "default":
+		if cover.CoverType == "default" {
 			return s.defaultCoverURL(), "", nil
 		}
 	}
 
+	// D6：读路径（详情）封面行缺失或 URL 失效时，与列表路径一致先做无锁评估
+	// 即时返回可用封面，再异步触发完整刷新（30s 去重节流）由后端持久化纠正。
+	members, memberErr := s.pool.Queries().ListFamilyMembers(ctx, familyID)
+	if memberErr != nil {
+		slog.WarnContext(ctx, "list family members for cover resolve failed", slog.String("family_id", familyID), slog.String("record_date", recordDate), slog.Any("error", memberErr))
+	} else if len(members) > 0 {
+		memberIDs := make([]string, 0, len(members))
+		for _, m := range members {
+			memberIDs = append(memberIDs, m.UserID)
+		}
+		if evalURL, evalFileID, _, evalErr := s.evaluateCoverForDate(ctx, familyID, recordDate, memberIDs, nil); evalErr != nil {
+			slog.WarnContext(ctx, "evaluate cover for detail failed", slog.String("family_id", familyID), slog.String("record_date", recordDate), slog.Any("error", evalErr))
+		} else if evalURL != "" {
+			s.refreshCoverAsync(familyID, recordDate)
+			return evalURL, evalFileID, nil
+		}
+	}
 	s.refreshCoverAsync(familyID, recordDate)
 	return s.defaultCoverURL(), "", nil
 }

@@ -374,7 +374,15 @@ Page({
       if (isFirstPage) {
         this._fullList = allData;
       } else {
-        this._fullList.push(...allData);
+        // offset 分页在并发增删（如家庭成员同时记录）时会产生重叠：
+        // 按 id 去重，避免同一条目在详情页重复展示。
+        const seen = new Set(this._fullList.map((e: any) => e && e.id).filter(Boolean));
+        for (const item of allData) {
+          const id = (item as any)?.id;
+          if (id && seen.has(id)) continue;
+          if (id) seen.add(id);
+          this._fullList.push(item);
+        }
       }
 
       this._memories = extraMemories;

@@ -31,8 +31,6 @@ import (
 )
 
 const (
-	inviteShortCodeCacheKey = "invite:code:%s"
-	inviteShortCodeCacheTTL = 30 * 24 * time.Hour
 	inviteQRCodeCacheKey    = "invite:qrcode:%s"
 	inviteQRCodeCacheTTL    = 6 * 24 * time.Hour
 	inviteQRCodeTargetRatio = 0.20
@@ -91,8 +89,8 @@ func (g *QRCodeGenerator) generate(ctx context.Context, rdb *redis.Client, userI
 		// 并发/快速重复调用会互删对方刚创建的文件（并缓存指向已删文件的 URL 6 天），
 		// 用按用户的 Redis 锁串行化生成：未抢到锁时短暂等待缓存落盘后直接返回。
 		lockKey := "invite:qrcode:gen:" + userID
-		lockClient := db.NewLock(rdb)
-		ok, token, lockErr := lockClient.TryLock(ctx, lockKey, 15*time.Second)
+		lockClient := db.NewAdvisoryLock(g.pool.PGX())
+		ok, token, lockErr := lockClient.TryLock(ctx, lockKey)
 		if lockErr == nil && ok {
 			defer lockClient.Unlock(context.WithoutCancel(ctx), lockKey, token) //nolint:errcheck
 		} else if lockErr == nil {
@@ -239,26 +237,34 @@ func (g *QRCodeGenerator) ensureShortCode(ctx context.Context, q *sqlc.Queries, 
 		return "", fmt.Errorf("get user invite code: %w", err)
 	}
 
-	code, err := util.NewShortCode(inviteShortCodeLen)
-	if err != nil {
-		return "", fmt.Errorf("generate short code: %w", err)
-	}
-	if _, dbErr := q.CreateUserInviteCode(ctx, sqlc.CreateUserInviteCodeParams{
-		UserID:    userID,
-		ShortCode: code,
-	}); dbErr != nil {
-		if dbx.IsUniqueViolation(dbErr) {
-			existing, getErr := q.GetUserInviteCode(ctx, userID)
-			if getErr != nil {
-				return "", fmt.Errorf("get user invite code after conflict: %w", getErr)
-			}
-			if existing != "" {
-				return existing, nil
-			}
+	// A-FIX-06：短码全局唯一，碰撞需换码重试（最长 3 次）；若冲突来自 user_id 唯一键，
+	// 说明本人已有码，直接复用。
+	const maxCodeAttempts = 3
+	for attempt := 0; attempt < maxCodeAttempts; attempt++ {
+		code, err := util.NewShortCode(inviteShortCodeLen)
+		if err != nil {
+			return "", fmt.Errorf("generate short code: %w", err)
 		}
-		return "", fmt.Errorf("create user invite code: %w", dbErr)
+		if _, dbErr := q.CreateUserInviteCode(ctx, sqlc.CreateUserInviteCodeParams{
+			UserID:    userID,
+			ShortCode: code,
+		}); dbErr != nil {
+			if dbx.IsUniqueViolation(dbErr) {
+				existing, getErr := q.GetUserInviteCode(ctx, userID)
+				if getErr == nil && existing != "" {
+					return existing, nil
+				}
+				if getErr != nil && !isPgNoRows(getErr) {
+					return "", fmt.Errorf("get user invite code after conflict: %w", getErr)
+				}
+				// 冲突在 short_code：换一个短码重试。
+				continue
+			}
+			return "", fmt.Errorf("create user invite code: %w", dbErr)
+		}
+		return code, nil
 	}
-	return code, nil
+	return "", fmt.Errorf("generate unique invite code: exhausted %d attempts", maxCodeAttempts)
 }
 
 func isPgNoRows(err error) bool {

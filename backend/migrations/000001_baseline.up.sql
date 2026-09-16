@@ -9,7 +9,9 @@ SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
-SELECT pg_catalog.set_config('search_path', '', false);
+-- 注意：pg_dump 默认把 search_path 置空；但后续迁移（000003/000004）使用不带 schema 的表名，
+-- 置空会让「全新环境」在种子迁移处报 relation does not exist。这里固定为 public。
+SELECT pg_catalog.set_config('search_path', 'public', false);
 SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;

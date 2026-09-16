@@ -74,6 +74,8 @@ WHERE id IN (
 )
 `
 
+// PPJ-J05：当前产品要求 API Key 永不过期（mcp/apiKeyNeverExpires=9999-12-31），本查询暂无调用；
+// 保留作为未来「Key 可过期」能力的预留，接线时挂到后台清理任务即可。
 func (q *Queries) DeleteExpiredAPIKeys(ctx context.Context, dollar_1 int64) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteExpiredAPIKeys, dollar_1)
 	if err != nil {

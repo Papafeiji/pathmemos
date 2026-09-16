@@ -451,9 +451,6 @@ func parseToolArgs(args json.RawMessage) (time.Time, time.Time, int, error) {
 	if limit <= 0 {
 		limit = defaultMcpPageSize
 	}
-	if limit > maxMcpEntries {
-		limit = maxMcpEntries
-	}
 
 	if startDate.After(endDate) {
 		return time.Time{}, time.Time{}, 0, fmt.Errorf("开始日期不能晚于结束日期")

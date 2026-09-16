@@ -195,9 +195,7 @@ func buildMessages(systemPrompt, nickname, background string, dialogLogs []sqlc.
 		sysContent += "\n\n以下是我家最近的生活记录，可作为回答背景参考（按时间倒序）：\n" + background
 	}
 
-	if sysContent != "" {
-		messages = append(messages, chatMessage{Role: "system", Content: sysContent})
-	}
+	messages = append(messages, chatMessage{Role: "system", Content: sysContent})
 
 	if nickname != "" {
 		identityMsg := "当前提问者是：" + nickname + "。请根据此身份区分\"我\"和家人各自的行程。"
@@ -265,8 +263,14 @@ func writeSSEDone(w http.ResponseWriter, flusher http.Flusher) error {
 	return nil
 }
 
-func writeSSEError(w http.ResponseWriter, flusher http.Flusher, bizCode string, message string) error {
-	payload, err := json.Marshal(map[string]string{"bizCode": bizCode, "message": message})
+func writeSSEError(w http.ResponseWriter, flusher http.Flusher, code string, bizCode string, message string) error {
+	body := map[string]string{"code": code, "message": message}
+	if bizCode != "" {
+		body["biz_code"] = bizCode
+		// 过渡兼容：旧版小程序只识别 camelCase bizCode；待新版本全量发布后移除。
+		body["bizCode"] = bizCode
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal sse error: %w", err)
 	}

@@ -14,7 +14,6 @@ import (
 	"unicode/utf8"
 
 	"papafeiji/backend/internal/db"
-	"papafeiji/backend/internal/file"
 	"papafeiji/backend/internal/middleware"
 	"papafeiji/backend/internal/vip"
 	pkgerrors "papafeiji/backend/pkg/errors"
@@ -30,16 +29,14 @@ type Handler struct {
 	router     chi.Router
 	pool       *db.Pool
 	vipService vip.InfoProvider
-	storage    *file.Storage
 	svc        *Service
 }
 
-func NewHandler(router chi.Router, pool *db.Pool, vipService vip.InfoProvider, storage *file.Storage, svc *Service) *Handler {
+func NewHandler(router chi.Router, pool *db.Pool, vipService vip.InfoProvider, svc *Service) *Handler {
 	return &Handler{
 		router:     router,
 		pool:       pool,
 		vipService: vipService,
-		storage:    storage,
 		svc:        svc,
 	}
 }
@@ -253,14 +250,16 @@ func (h *Handler) GetDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	extra, _ := resp["extra"].(map[string]interface{})
-	middleware.JSONWithExtra(w, r, http.StatusOK, entries, extra)
+	// PPJ-D01：服务端已算得条目总数，透传 count 供前端分页判断。
+	count, _ := resp["count"].(int64)
+	middleware.JSONWithExtraAndCount(w, r, http.StatusOK, entries, extra, int(count))
 }
 
 func readDiaryJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}, maxBytes int64) bool {
 	if err := middleware.ReadJSONBody(w, r, dst, maxBytes); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
-			middleware.JSONError(w, r, http.StatusRequestEntityTooLarge, pkgerrors.CodeBadRequest, "request body too large")
+			middleware.JSONError(w, r, http.StatusRequestEntityTooLarge, pkgerrors.CodeRequestEntityTooLarge, "request body too large")
 		} else {
 			middleware.JSONError(w, r, http.StatusBadRequest, pkgerrors.CodeBadRequest, "invalid request body")
 		}
@@ -271,11 +270,11 @@ func readDiaryJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}, 
 
 func writeEntryValidationError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, errTextTooLong) {
-		middleware.JSONError(w, r, pkgerrors.HTTPStatus(pkgerrors.BizTextTooLong), pkgerrors.BizTextTooLong, err.Error())
+		middleware.JSONBizError(w, r, pkgerrors.BizTextTooLong, err.Error())
 	} else if errors.Is(err, errInvalidColor) {
-		middleware.JSONError(w, r, pkgerrors.HTTPStatus(pkgerrors.BizInvalidColorFormat), pkgerrors.BizInvalidColorFormat, err.Error())
+		middleware.JSONBizError(w, r, pkgerrors.BizInvalidColorFormat, err.Error())
 	} else if errors.Is(err, errInvalidCoords) {
-		middleware.JSONError(w, r, pkgerrors.HTTPStatus(pkgerrors.BizInvalidCoordinates), pkgerrors.BizInvalidCoordinates, err.Error())
+		middleware.JSONBizError(w, r, pkgerrors.BizInvalidCoordinates, err.Error())
 	} else if errors.Is(err, errTooManyImages) {
 		middleware.JSONError(w, r, http.StatusBadRequest, pkgerrors.CodeBadRequest, err.Error())
 	} else {
@@ -294,7 +293,7 @@ func writeDiaryServiceError(w http.ResponseWriter, r *http.Request, err error, a
 	case errors.Is(err, ErrPermissionDenied):
 		middleware.JSONError(w, r, http.StatusForbidden, pkgerrors.CodeForbidden, err.Error())
 	case errors.Is(err, ErrCoverUpdateInProgress):
-		middleware.JSONError(w, r, pkgerrors.HTTPStatus(pkgerrors.BizOperationInProgress), pkgerrors.BizOperationInProgress, "cover update in progress")
+		middleware.JSONBizError(w, r, pkgerrors.BizOperationInProgress, "cover update in progress")
 	default:
 		middleware.JSONError(w, r, http.StatusInternalServerError, pkgerrors.CodeInternalError, "failed to "+action)
 	}
@@ -505,7 +504,7 @@ func (h *Handler) CreateAutoEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !info.IsVIP {
-		middleware.JSONError(w, r, pkgerrors.HTTPStatus(pkgerrors.BizNotVip), pkgerrors.CodeBadRequest, "not vip")
+		middleware.JSONBizError(w, r, pkgerrors.BizNotVip, "not vip")
 		return
 	}
 
@@ -517,14 +516,18 @@ func (h *Handler) CreateAutoEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validator.ValidateCoordinates(req.Lat, req.Lon); err != nil {
-		middleware.JSONError(w, r, pkgerrors.HTTPStatus(pkgerrors.BizInvalidCoordinates), pkgerrors.CodeBadRequest, err.Error())
+		middleware.JSONBizError(w, r, pkgerrors.BizInvalidCoordinates, err.Error())
 		return
 	}
 
 	entryID, familyID, _, err := h.svc.CreateAutoEntry(ctx, userID, req.Lat, req.Lon)
 	if err != nil {
 		if errors.Is(err, ErrDailyReverseQuotaExceeded) {
-			middleware.JSONError(w, r, http.StatusTooManyRequests, pkgerrors.BizRateLimited, "daily reverse geocode quota exceeded")
+			middleware.JSONBizError(w, r, pkgerrors.BizRateLimited, "daily reverse geocode quota exceeded")
+			return
+		}
+		if errors.Is(err, ErrAutoEntryInProgress) {
+			middleware.JSONBizError(w, r, pkgerrors.BizOperationInProgress, "auto entry in progress")
 			return
 		}
 		middleware.JSONError(w, r, http.StatusInternalServerError, pkgerrors.CodeInternalError, "failed to create auto entry")

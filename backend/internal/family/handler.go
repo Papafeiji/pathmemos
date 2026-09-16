@@ -33,7 +33,7 @@ type Handler struct {
 	defaultAvatar string
 }
 
-func NewHandler(router chi.Router, pool *db.Pool, rdb *redis.Client, lock *db.Lock, defaultAvatarURL string, vipService VipServicer) *Handler {
+func NewHandler(router chi.Router, pool *db.Pool, rdb *redis.Client, lock db.Locker, defaultAvatarURL string, vipService VipServicer) *Handler {
 	svc := NewService(pool, rdb, lock, defaultAvatarURL)
 	return &Handler{
 		router:        router,
@@ -92,9 +92,7 @@ func (h *Handler) CreateFamily(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch err {
 		case ErrAlreadyInFamily:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizAlreadyInFamily), errors.CodeBadRequest, err.Error(), errors.BizAlreadyInFamily)
-		case ErrOperationInProgress:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
+			middleware.JSONBizError(w, r, errors.BizAlreadyInFamily, err.Error())
 		default:
 			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to create family")
 		}
@@ -115,9 +113,9 @@ func (h *Handler) LeaveFamily(w http.ResponseWriter, r *http.Request) {
 		case ErrNotInNormalFamily:
 			middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, err.Error())
 		case ErrOwnerCannotLeave:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOwnerCannotLeaveFamily), errors.CodeBadRequest, err.Error(), errors.BizOwnerCannotLeaveFamily)
+			middleware.JSONBizError(w, r, errors.BizOwnerCannotLeaveFamily, err.Error())
 		case ErrOperationInProgress:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
+			middleware.JSONBizError(w, r, errors.BizOperationInProgress, err.Error())
 		default:
 			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to leave family")
 		}
@@ -140,15 +138,15 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.RemoveMember(ctx, userID, targetUserID); err != nil {
 		switch err {
 		case ErrCannotRemoveSelf:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizCannotRemoveSelf), errors.CodeBadRequest, err.Error(), errors.BizCannotRemoveSelf)
+			middleware.JSONBizError(w, r, errors.BizCannotRemoveSelf, err.Error())
 		case ErrCannotRemoveOwner:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizCannotRemoveOwner), errors.CodeBadRequest, err.Error(), errors.BizCannotRemoveOwner)
+			middleware.JSONBizError(w, r, errors.BizCannotRemoveOwner, err.Error())
 		case ErrNotInNormalFamily, ErrNotOwner:
 			middleware.JSONError(w, r, http.StatusForbidden, errors.CodeForbidden, err.Error())
 		case ErrTargetNotInFamily:
 			middleware.JSONError(w, r, http.StatusNotFound, errors.CodeNotFound, err.Error())
 		case ErrOperationInProgress:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
+			middleware.JSONBizError(w, r, errors.BizOperationInProgress, err.Error())
 		default:
 			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to remove member")
 		}
@@ -169,7 +167,7 @@ func (h *Handler) DissolveFamily(w http.ResponseWriter, r *http.Request) {
 		case ErrNotOwner:
 			middleware.JSONError(w, r, http.StatusForbidden, errors.CodeForbidden, err.Error())
 		case ErrOperationInProgress:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
+			middleware.JSONBizError(w, r, errors.BizOperationInProgress, err.Error())
 		default:
 			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to dissolve family")
 		}
@@ -200,9 +198,7 @@ func (h *Handler) CreateInviteLink(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			switch err {
 			case ErrAlreadyInFamily:
-				middleware.JSONError(w, r, errors.HTTPStatus(errors.BizAlreadyInFamily), errors.CodeBadRequest, err.Error(), errors.BizAlreadyInFamily)
-			case ErrOperationInProgress:
-				middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
+				middleware.JSONBizError(w, r, errors.BizAlreadyInFamily, err.Error())
 			default:
 				middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to create family")
 			}
@@ -224,7 +220,7 @@ func (h *Handler) JoinByInviteLink(w http.ResponseWriter, r *http.Request) {
 		LinkID string `json:"linkId"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 64*1024); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 	if req.LinkID == "" {
@@ -236,15 +232,15 @@ func (h *Handler) JoinByInviteLink(w http.ResponseWriter, r *http.Request) {
 
 		switch err {
 		case ErrFamilyNotFound:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizFamilyNotFound), errors.CodeBadRequest, err.Error(), errors.BizFamilyNotFound)
+			middleware.JSONBizError(w, r, errors.BizFamilyNotFound, err.Error())
 		case ErrTargetIsPersonalFamily:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizTargetIsPersonalFamily), errors.CodeBadRequest, err.Error(), errors.BizTargetIsPersonalFamily)
+			middleware.JSONBizError(w, r, errors.BizTargetIsPersonalFamily, err.Error())
 		case ErrAlreadyInTargetFamily:
 			middleware.JSON(w, r, http.StatusOK, map[string]interface{}{})
 		case ErrFamilyFull:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizFamilyFull), errors.CodeBadRequest, err.Error(), errors.BizFamilyFull)
+			middleware.JSONBizError(w, r, errors.BizFamilyFull, err.Error())
 		case ErrOperationInProgress:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error(), errors.BizOperationInProgress)
+			middleware.JSONBizError(w, r, errors.BizOperationInProgress, err.Error())
 		default:
 			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to join family")
 		}

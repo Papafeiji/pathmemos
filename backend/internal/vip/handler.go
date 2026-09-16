@@ -85,7 +85,7 @@ func (h *Handler) ClaimFreeVIP(w http.ResponseWriter, r *http.Request) {
 		VipID string `json:"vipId"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, maxVIPRequestBodySize); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 	if req.VipID == "" {
@@ -96,7 +96,7 @@ func (h *Handler) ClaimFreeVIP(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.ClaimFreeVIP(ctx, userID, req.VipID); err != nil {
 		switch err {
 		case ErrFreeVIPAlreadyClaimed:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizFreeVipAlreadyClaimed), errors.CodeBadRequest, err.Error(), errors.BizFreeVipAlreadyClaimed)
+			middleware.JSONBizError(w, r, errors.BizFreeVipAlreadyClaimed, err.Error())
 		case ErrInvalidVIP:
 			middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, err.Error())
 		default:
@@ -136,7 +136,7 @@ func (h *Handler) ClaimTrialVIP(w http.ResponseWriter, r *http.Request) {
 	if err := h.service.ClaimTrialVIP(ctx, userID); err != nil {
 		switch err {
 		case ErrTrialVIPAlreadyClaimed:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizTrialVipAlreadyClaimed), errors.CodeBadRequest, err.Error(), errors.BizTrialVipAlreadyClaimed)
+			middleware.JSONBizError(w, r, errors.BizTrialVipAlreadyClaimed, err.Error())
 		default:
 
 			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to claim trial vip")

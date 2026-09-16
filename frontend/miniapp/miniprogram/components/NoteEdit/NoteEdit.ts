@@ -2,6 +2,7 @@
 import dayjs from '../../lib/dayjs';
 import { safeDayjs, getReverseAddress, flatDistanceMeters, formatTimeLabel, type ReverseAddressResult } from '../../utils/util';
 import request, { FILE_TYPE, getErrorMessage, createCancelToken, resetLoading } from '../../utils/request';
+import { opsLog, opsLogFail } from '../../utils/opslog';
 import i18nBehavior from '../../behaviors/i18n';
 import { i18n } from '../../utils/i18n';
 
@@ -510,11 +511,13 @@ Component({
       }
 
       self._submitting = true;
+      // PPJ-B08：快照提升到 try 外，便于部分上传失败时把已成功图片的 id 落回 imgList。
+      let imgSnapshot: any[] = [];
 
       try {
         // 提交时拍定 imgList 快照：上传是异步的，期间若 imgList 被增删（尽管有守卫，
         // 仍防外部路径），重建结果与上传的 imageIds 会错位（新图丢 id/已删图复活）。
-        const imgSnapshot = this.data.imgList.map((item: any) => ({ ...item }));
+        imgSnapshot = this.data.imgList.map((item: any) => ({ ...item }));
         const hasUpload = imgSnapshot.some((item: any) => item.type === FILE_TYPE.TO_BE_UPLOADED);
         const hasDelete = imgSnapshot.some((item: any) => item.type === FILE_TYPE.DELETE);
         const existingUploadedIds: string[] = imgSnapshot
@@ -566,21 +569,44 @@ Component({
           try { self._saveCancelToken.cancel(); } catch {}
         }
         self._saveCancelToken = createCancelToken();
-        const res: any = this.data.form.id
+        const isUpdate = !!this.data.form.id;
+        opsLog('manual_record_start', {
+          isUpdate,
+          textLen: (recordText || '').length,
+          imageCount: (imageIds || []).length,
+          recordTime: recordDateTime.toISOString(),
+        });
+        const res: any = isUpdate
           ? await request.put('/diary/details', { ...payload, cancelToken: self._saveCancelToken }, true)
           : await request.post('/diary/details', { ...payload, cancelToken: self._saveCancelToken }, true);
         self._saveCancelToken = null;
 
         if (self._isDestroyed || self._isDetached) return;
+        opsLog('manual_record_ok', { isUpdate, hasCard: !!res?.data?.card, recordDate: this.data.form.date });
         this.triggerEvent('submit', { recordDate: this.data.form.date, card: res?.data?.card });
         this.cancel();
       } catch (error: any) {
         if (!self._isAlive()) return;
+        // PPJ-B08：部分图片已上传成功但整批失败时，把成功项标记为 UPLOADED，
+        // 下次提交只补传失败图，避免重复上传（孤儿文件 + 配额浪费）。
+        if (imgSnapshot.length > 0 && imgSnapshot.length === this.data.imgList.length) {
+          const patched = this.data.imgList.map((item: any, i: number) => {
+            const snap: any = imgSnapshot[i];
+            if (item.type === FILE_TYPE.TO_BE_UPLOADED && snap && snap.uploadedId) {
+              return { ...item, type: FILE_TYPE.UPLOADED, id: snap.uploadedId };
+            }
+            return item;
+          });
+          if (patched.some((item: any, i: number) => item !== this.data.imgList[i])) {
+            (this as any)._safeSetData({ imgList: patched });
+          }
+        }
         if (error?.message === 'request:abort') return;
         if (error?.code === 'USER_IMAGE_STORAGE_LIMIT_EXCEEDED') {
           this.showStorageLimitDialog();
           return;
         }
+        opsLogFail('manual_record_fail', error, { isUpdate: !!this.data.form.id });
         if (!error?._handledByModal) {
           wx.showToast({ title: getErrorMessage(error, (this as any).$t('noteEdit.saveFail')), icon: 'none' });
         }

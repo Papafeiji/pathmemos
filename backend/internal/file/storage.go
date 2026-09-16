@@ -21,6 +21,8 @@ type Storage struct {
 	baseDir string
 	baseURL string
 	oss     *OSSStore
+	// onOSSDelete OSS 对象物理删除成功后回调（记录待 CDN 刷新 URL，ADR-0013）；可为 nil。
+	onOSSDelete func(objectURL string)
 }
 
 func NewStorage(baseDir string) *Storage {
@@ -45,8 +47,10 @@ func (s *Storage) WithOSS(oss *OSSStore) *Storage {
 	return s
 }
 
-func (s *Storage) BaseDir() string {
-	return s.baseDir
+// WithOSSDeleteHook 注册 OSS 对象物理删除成功后的回调（ADR-0013 边缘缓存收敛）。
+func (s *Storage) WithOSSDeleteHook(fn func(objectURL string)) *Storage {
+	s.onOSSDelete = fn
+	return s
 }
 
 func (s *Storage) OSSConfigured() bool {
@@ -173,35 +177,6 @@ func (s *Storage) SaveWithName(reader io.Reader, ext, fileName string) (string, 
 	return relPath, size, nil
 }
 
-func (s *Storage) IsObjectExist(key, storageType string) (bool, error) {
-	if storageType == "oss" {
-		if s.oss == nil {
-			return false, fmt.Errorf("oss not configured")
-		}
-		return s.oss.IsObjectExist(key)
-	}
-	clean := filepath.Clean(strings.TrimPrefix(key, "/"))
-	if clean == "" || clean == "." || !filepath.IsLocal(clean) {
-		return false, fmt.Errorf("invalid path")
-	}
-	absPath, err := filepath.Abs(filepath.Join(s.baseDir, clean))
-	if err != nil {
-		return false, fmt.Errorf("resolve path: %w", err)
-	}
-	basePrefix := s.baseDir + string(filepath.Separator)
-	if !strings.HasPrefix(absPath, basePrefix) {
-		return false, fmt.Errorf("invalid path")
-	}
-	_, err = os.Stat(absPath)
-	if err == nil {
-		return true, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	return false, err
-}
-
 func (s *Storage) Delete(relPath string) error {
 	clean := filepath.Clean(strings.TrimPrefix(relPath, "/"))
 	if clean == "" || clean == "." || !filepath.IsLocal(clean) {
@@ -227,7 +202,16 @@ func (s *Storage) DeleteFile(path, storageType string) error {
 		if s.oss == nil {
 			return fmt.Errorf("oss not configured")
 		}
-		return s.oss.Delete(path)
+		if err := s.oss.Delete(path); err != nil {
+			return err
+		}
+		// ADR-0013：删除成功后记录公开 URL，供后台任务批量刷新 CDN 边缘缓存。
+		if s.onOSSDelete != nil {
+			if objectURL, uerr := s.URL(path, "oss"); uerr == nil && objectURL != "" {
+				s.onOSSDelete(objectURL)
+			}
+		}
+		return nil
 	}
 	return s.Delete(path)
 }

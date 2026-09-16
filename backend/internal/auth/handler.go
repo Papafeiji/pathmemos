@@ -41,10 +41,8 @@ type SessionStore interface {
 }
 
 type Handler struct {
-	router        chi.Router
 	pool          *db.Pool
 	bgPool        *db.Pool
-	rdb           *redis.Client
 	sessions      SessionStore
 	wechat        *WechatClient
 	vipService    VIPService
@@ -66,12 +64,10 @@ type FamilyService interface {
 	DeleteAccount(ctx context.Context, userID string) (*family.AccountCleanupInfo, error)
 }
 
-func NewHandlerWithBackgroundPool(router chi.Router, pool *db.Pool, bgPool *db.Pool, rdb *redis.Client, cfg *config.Config, sessions *middleware.SessionManager, vipService VIPService, familyService FamilyService, avatarService *avatar.Service, storage *file.Storage, defaultAvatarURL string) *Handler {
+func NewHandlerWithBackgroundPool(pool *db.Pool, bgPool *db.Pool, rdb *redis.Client, cfg *config.Config, sessions *middleware.SessionManager, vipService VIPService, familyService FamilyService, avatarService *avatar.Service, storage *file.Storage, defaultAvatarURL string) *Handler {
 	return &Handler{
-		router:        router,
 		pool:          pool,
 		bgPool:        bgPool,
-		rdb:           rdb,
 		sessions:      sessions,
 		wechat:        NewWechatClient(cfg, rdb),
 		vipService:    vipService,
@@ -89,10 +85,9 @@ func (h *Handler) RegisterPublic(router chi.Router) {
 func (h *Handler) RegisterProtected(router chi.Router) {
 	router.Post("/auth/logout", h.Logout)
 	router.Get("/auth/phone", h.GetPhone)
-	router.Post("/auth/phone/bind", h.BindPhone)
 	router.Post("/auth/phone/unbind", h.UnbindPhone)
 	router.Post("/auth/inviter", h.BindInviter)
-	// DELETE /auth/account 由 main.go 单独注册（含 IP 限流）
+	// POST /auth/phone/bind 由 main.go 单独注册（含 IP 限流，A-FIX-04）；DELETE /auth/account 同理。
 }
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +98,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		Inviter string `json:"inviter"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 	if req.Code == "" {
@@ -166,10 +161,6 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	sessionID := middleware.SessionID(ctx)
-	if sessionID == "" {
-		middleware.JSONError(w, r, http.StatusUnauthorized, errors.CodeUnauthorized, "unauthorized")
-		return
-	}
 
 	if err := h.sessions.Delete(ctx, sessionID); err != nil {
 		slog.ErrorContext(ctx, "delete session failed", slog.String("session_id", util.MaskID(sessionID)), slog.Any("error", err))
@@ -197,8 +188,10 @@ func (h *Handler) GetPhone(w http.ResponseWriter, r *http.Request) {
 		phone = nil
 	}
 
+	// 与后端 BindPhone 的 phoneModificationLockedToday 对齐：只要当天绑定过（无论当前是否已解绑），
+	// 当天都不可再绑定，避免客户端显示可改、服务端却拒绝。
 	canModifyToday := true
-	if user.PhoneNumber.Valid && user.PhoneNumber.String != "" && user.PhoneBindTime.Valid {
+	if user.PhoneBindTime.Valid {
 		bindDate := user.PhoneBindTime.Time.In(timeutil.Shanghai).Format("2006-01-02")
 		today := timeutil.NowShanghai().Format("2006-01-02")
 		canModifyToday = bindDate != today
@@ -227,7 +220,7 @@ func (h *Handler) BindPhone(w http.ResponseWriter, r *http.Request) {
 		Code string `json:"code"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 
@@ -254,18 +247,26 @@ func (h *Handler) BindPhone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.pool.Queries().UpdateUserPhone(ctx, sqlc.UpdateUserPhoneParams{
+	today := timeutil.NowShanghai()
+	rows, err := h.pool.Queries().BindUserPhoneIfAllowed(ctx, sqlc.BindUserPhoneIfAllowedParams{
 		ID:            userID,
 		PhoneNumber:   pgtype.Text{String: phone, Valid: true},
 		PhoneBindTime: nowPgxTimestamptz(),
-	}); err != nil {
+		Today:         pgtype.Date{Time: time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location()), Valid: true},
+	})
+	if err != nil {
 		if dbx.IsUniqueViolation(err) {
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizPhoneAlreadyBound), errors.CodeBadRequest, "phone already bound")
+			middleware.JSONBizError(w, r, errors.BizPhoneAlreadyBound, "phone already bound")
 			return
 		}
 		err = fmt.Errorf("bind phone: %w", err)
 		slog.ErrorContext(ctx, "bind phone failed", slog.String("user_id", userID), slog.Any("error", err))
 		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to bind phone")
+		return
+	}
+	if rows == 0 {
+		// A-FIX-03：并发下其他请求已在本日完成绑定；以原子条件的受影响行数为权威判定。
+		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "phone can only be modified once per day")
 		return
 	}
 
@@ -280,14 +281,14 @@ func (h *Handler) UnbindPhone(w http.ResponseWriter, r *http.Request) {
 		Code string `json:"code"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 
-	// R4：解绑不再调用微信 GetPhoneNumber（每次 code 交换都会产生认证费用），
-	// 因此也不受"每天最多一次"的日限约束——绑错号码当天即可解绑重绑。
-	// 安全边界：登录态持有者即账号所有者，解绑自己账号的手机号无需二次验证；
-	// 绑定仍保留微信验证 + 日限（产品要求：每天最多绑定一次）。
+	// R4：解绑不再调用微信 GetPhoneNumber（每次 code 交换都会产生认证费用）。
+	// 安全边界：登录态持有者即账号所有者，解绑自己账号的手机号无需二次验证。
+	// 日限口径：绑定受「每天最多绑定一次」约束；解绑保留 PhoneBindTime（不清空），
+	// 否则「绑→解绑→当天再绑」可绕过日限并反复消耗微信手机号认证额度。
 	user, err := h.pool.Queries().GetUserByID(ctx, userID)
 	if err != nil {
 		slog.ErrorContext(ctx, "unbind phone get user failed", slog.String("user_id", userID), slog.Any("error", err))
@@ -300,9 +301,10 @@ func (h *Handler) UnbindPhone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.pool.Queries().UpdateUserPhone(ctx, sqlc.UpdateUserPhoneParams{
-		ID:            userID,
-		PhoneNumber:   pgtype.Text{},
-		PhoneBindTime: pgtype.Timestamptz{},
+		ID:          userID,
+		PhoneNumber: pgtype.Text{},
+		// 保留最后一次绑定时间：日限据此判定「当天是否绑定过」，解绑不清空。
+		PhoneBindTime: user.PhoneBindTime,
 	}); err != nil {
 		err = fmt.Errorf("unbind phone: %w", err)
 		slog.ErrorContext(ctx, "unbind phone failed", slog.String("user_id", userID), slog.Any("error", err))
@@ -329,7 +331,7 @@ func (h *Handler) BindInviter(w http.ResponseWriter, r *http.Request) {
 		Inviter string `json:"inviter"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 	if req.Inviter == "" || req.Inviter == userID {
@@ -416,7 +418,7 @@ func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 		ConfirmName string `json:"confirmName"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 	if req.ConfirmName == "" {
@@ -457,7 +459,7 @@ func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch err {
 		case family.ErrOperationInProgress:
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOperationInProgress), errors.CodeBadRequest, err.Error())
+			middleware.JSONBizError(w, r, errors.BizOperationInProgress, err.Error())
 		default:
 			middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to delete account")
 		}
@@ -496,6 +498,10 @@ func (h *Handler) findOrCreateUser(ctx context.Context, session *WechatSession, 
 			}
 			return &fullUser, false, nil
 		}
+		if !stderrors.Is(err, pgx.ErrNoRows) {
+			// A-FIX-05：DB 抖动不能当作「无此用户」，否则会误建新账号。
+			return nil, false, fmt.Errorf("get user by union id: %w", err)
+		}
 	}
 
 	user, err := queries.GetUserByOpenID(ctx, session.OpenID)
@@ -521,6 +527,10 @@ func (h *Handler) findOrCreateUser(ctx context.Context, session *WechatSession, 
 			return nil, false, fmt.Errorf("get user after openid login: %w", err)
 		}
 		return &fullUser, false, nil
+	}
+	if !stderrors.Is(err, pgx.ErrNoRows) {
+		// A-FIX-05：同上，真实 DB 错误向上返回 500。
+		return nil, false, fmt.Errorf("get user by open id: %w", err)
 	}
 
 	userID, err := util.NewUUID()

@@ -4,6 +4,15 @@ import { isIOS } from './util';
 import { i18n } from './i18n';
 import type { CancelToken } from './http';
 
+// VP-P2-05：支付被取消/失败后 best-effort 关闭本地 pending 订单，避免订单滞留到
+// 5 分钟（换单清理）或 24 小时（后台任务）才回收；后端 cancel 幂等。
+const cancelOrder = (outTradeNo?: string): void => {
+  if (!outTradeNo) return;
+  request.post('/payment/virtual/cancel', { data: { outTradeNo } }, true).catch((e: any) => {
+    logger.error('取消虚拟支付订单失败', e);
+  });
+};
+
 const getPayEnv = (): number => {
   try {
     const env = wx.getAccountInfoSync().miniProgram.envVersion;
@@ -52,6 +61,7 @@ export const doPay = async (
 
   await new Promise<void>((resolve, reject) => {
     if (cancelToken?.isCancelled()) {
+      cancelOrder(outTradeNo);
       reject(new Error('request:abort'));
       return;
     }
@@ -67,6 +77,7 @@ export const doPay = async (
         try { onVirtualPaySuccess && onVirtualPaySuccess(outTradeNo); } catch {}
       },
       fail(res: any) {
+        cancelOrder(outTradeNo);
         if (cancelToken?.isCancelled()) {
           reject(new Error('request:abort'));
           return;

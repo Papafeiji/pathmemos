@@ -44,5 +44,11 @@ func (p *Pool) Queries() *sqlc.Queries {
 	return p.queries
 }
 
+// PGX 返回底层 *pgxpool.Pool（需要连接级操作时使用；测试注入 mock 时返回 nil）。
+func (p *Pool) PGX() *pgxpool.Pool {
+	r, _ := p.pool.(*pgxpool.Pool)
+	return r
+}
+
 var _ TxBeginner = (*pgxpool.Pool)(nil)
 var _ DBTX = (*pgxpool.Pool)(nil)

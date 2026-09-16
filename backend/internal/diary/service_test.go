@@ -9,6 +9,7 @@ import (
 	"papafeiji/backend/internal/db"
 	"papafeiji/backend/internal/db/sqlc"
 	"papafeiji/backend/internal/file"
+	"papafeiji/backend/internal/location"
 	"papafeiji/backend/pkg/timeutil"
 
 	"github.com/jackc/pgx/v5"
@@ -27,7 +28,7 @@ func userRowDiary(id string) *pgxmock.Rows {
 		"nickname", "user_type", "phone_bind_time", "auto_record_enabled",
 		"personal_family_id", "current_family_id", "invited_by", "lang",
 		"created_at", "updated_at", "abnormal_subscribe_accepted", "last_active_at",
-	}).AddRow(id, "openid-" + id, nil, nil, nil, nil,
+	}).AddRow(id, "openid-"+id, nil, nil, nil, nil,
 		pgtype.Text{String: "用户", Valid: true}, "wechat", nil, false,
 		pgtype.Text{String: "fam-1", Valid: true}, pgtype.Text{String: "fam-1", Valid: true},
 		nil, "zh", now, now, false, now)
@@ -244,5 +245,29 @@ func TestCoverURLFromRow_ImageTypeUsesFile(t *testing.T) {
 	}
 	if !ok || url == "" {
 		t.Fatalf("image type should use file, got ok=%v url=%q", ok, url)
+	}
+}
+
+// TestPickGeocodeResult DA-P2-03：地址空但 POI 非空仍可成文；两者都空才失败。
+func TestPickGeocodeResult(t *testing.T) {
+	cases := []struct {
+		name         string
+		res          *location.ReverseResult
+		wantLandmark string
+		wantAddress  string
+		wantOK       bool
+	}{
+		{"poi only", &location.ReverseResult{Landmark: "某小区"}, "某小区", "", true},
+		{"address only", &location.ReverseResult{Address: "北京路"}, "北京路", "北京路", true},
+		{"both empty", &location.ReverseResult{}, "", "", false},
+		{"poi wins", &location.ReverseResult{Landmark: "POI", Address: "北京路"}, "POI", "北京路", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lm, addr, ok := pickGeocodeResult(tc.res)
+			if lm != tc.wantLandmark || addr != tc.wantAddress || ok != tc.wantOK {
+				t.Fatalf("got (landmark=%q address=%q ok=%v), want (%q %q %v)", lm, addr, ok, tc.wantLandmark, tc.wantAddress, tc.wantOK)
+			}
+		})
 	}
 }

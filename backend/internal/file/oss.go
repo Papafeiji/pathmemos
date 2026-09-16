@@ -59,13 +59,6 @@ func (o *OSSStore) SaveWithKey(reader io.Reader, key string, size int64) (string
 	return key, size, nil
 }
 
-func (o *OSSStore) IsObjectExist(key string) (bool, error) {
-	if o.bucket == nil {
-		return false, fmt.Errorf("oss bucket not configured")
-	}
-	return o.bucket.IsObjectExist(key)
-}
-
 func (o *OSSStore) Delete(key string) error {
 	if o.bucket == nil {
 		return fmt.Errorf("oss bucket not configured")

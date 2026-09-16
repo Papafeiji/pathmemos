@@ -68,8 +68,7 @@ load_or_create_env() {
   _gum_style_box "PathMemos Open 部署向导\n\n在本地或服务器一键部署私有化日记后端。"
 
   ui_section "[1/4] AI 服务配置"
-  local AI_PROVIDER AI_API_KEY AI_BASE_URL AI_MODEL
-  AI_PROVIDER=$(_gum_input --placeholder "AI Provider" --value "${AI_PROVIDER:-deepseek}")
+  local AI_API_KEY AI_BASE_URL AI_MODEL
   AI_API_KEY=$(_gum_input --placeholder "AI API Key" --password)
   if [[ -z "$AI_API_KEY" ]]; then
     ui_error "AI API Key 不能为空"
@@ -89,7 +88,7 @@ load_or_create_env() {
   # 这些值会原样写入 .env 并被 shell source：拒绝空白、引号、$、反引号、&、#，
   # 防止 source .env 解析失败、截断或注入命令执行
   local bad_re="[[:space:]\"'\`\$&#]" v
-  for v in AI_PROVIDER AI_API_KEY AI_BASE_URL AI_MODEL TENCENT_MAP_KEY; do
+  for v in AI_API_KEY AI_BASE_URL AI_MODEL TENCENT_MAP_KEY; do
     if [[ "${!v}" =~ $bad_re ]]; then
       ui_error "$v 含有非法字符（不允许空白、引号、\$、反引号、&、#），请重新运行本脚本"
       exit 1
@@ -103,7 +102,6 @@ load_or_create_env() {
   OPEN_API_KEY=$(openssl rand -hex 32)
 
   ui_section "[4/4] 确认部署计划"
-  ui_kv "AI Provider" "$AI_PROVIDER"
   ui_kv "AI Base URL" "$AI_BASE_URL"
   ui_kv "AI Model" "$AI_MODEL"
   ui_kv "腾讯地图 Key" "${TENCENT_MAP_KEY:0:8}..."
@@ -117,7 +115,6 @@ DB_PASSWORD=${DB_PASSWORD}
 REDIS_PASSWORD=${REDIS_PASSWORD}
 OPEN_API_KEY=${OPEN_API_KEY}
 AI_API_KEY=${AI_API_KEY}
-AI_PROVIDER=${AI_PROVIDER}
 AI_BASE_URL=${AI_BASE_URL}
 AI_MODEL=${AI_MODEL}
 TENCENT_MAP_KEY=${TENCENT_MAP_KEY}

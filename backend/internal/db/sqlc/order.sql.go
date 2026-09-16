@@ -191,6 +191,29 @@ func (q *Queries) ListPendingOrdersBefore(ctx context.Context, arg ListPendingOr
 	return items, nil
 }
 
+const markClosedOrderPaid = `-- name: MarkClosedOrderPaid :execrows
+UPDATE orders SET
+    state = 'paid',
+    transaction_id = $2,
+    paid_at = now(),
+    updated_at = now()
+WHERE out_trade_no = $1 AND state = 'closed'
+`
+
+type MarkClosedOrderPaidParams struct {
+	OutTradeNo    string      `json:"outTradeNo"`
+	TransactionID pgtype.Text `json:"transactionId"`
+}
+
+// VP-P1-02：订单已被本地关闭（取消/超时/换单清理）但用户仍完成支付，补记为 paid 以便发货。
+func (q *Queries) MarkClosedOrderPaid(ctx context.Context, arg MarkClosedOrderPaidParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markClosedOrderPaid, arg.OutTradeNo, arg.TransactionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const nullifyOrdersByUser = `-- name: NullifyOrdersByUser :exec
 UPDATE orders SET user_id = NULL, updated_at = now() WHERE user_id = $1
 `

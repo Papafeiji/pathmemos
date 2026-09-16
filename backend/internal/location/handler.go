@@ -51,7 +51,7 @@ func (h *Handler) Reverse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !CheckReverseQuota(ctx, h.rdb, userID) {
-		middleware.JSONError(w, r, http.StatusTooManyRequests, errors.BizRateLimited, "daily reverse geocode quota exceeded")
+		middleware.JSONBizError(w, r, errors.BizRateLimited, "daily reverse geocode quota exceeded")
 		return
 	}
 

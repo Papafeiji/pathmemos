@@ -45,7 +45,6 @@ Component({
       (this as any)._isDetached = false;
       (this as any)._isDestroyed = false;
       (this as any)._isHidden = false;
-      (this as any)._deleting = false;
       // 防止部分基础库 observer 未在 attached 后触发，导致卡片空白、点击无反应。
       const info = this.data.info;
       if (info) {
@@ -64,8 +63,7 @@ Component({
         try { (this as any)._cancelToken.cancel(); } catch {}
         (this as any)._cancelToken = null;
       }
-      // 列表项回收复用时，_deleting/_ignoreNextTap 可能仍停留在 true，导致新项无法删除/点击被忽略。
-      (this as any)._deleting = false;
+      // 列表项回收复用时，_ignoreNextTap 可能仍停留在 true，导致新项点击被忽略。
       (this as any)._ignoreNextTap = false;
     },
   },
@@ -73,7 +71,6 @@ Component({
   pageLifetimes: {
     hide(this: any) {
       // 删除是写操作，不在 page hide 时取消请求；_cancelToken 在 detached / 删除完成时清理。
-      // _deleting 是防止重复删除的异步状态标志，也不在 hide 中复位。
       (this as any)._forceSetData({
         'confirmDialog.visible': false,
         isTouchLeft: false,
@@ -180,7 +177,6 @@ Component({
       // 按 FP076：日记删除为普通业务，不做函数级防重入锁；重复删除由后端兜底。
       const id = this.data.info?.id;
       if (!id) return;
-      (this as any)._deleting = true;
       (this as any)._safeSetData({ 'confirmDialog.visible': false, isTouchLeft: false });
       const cancelToken = createCancelToken();
       (this as any)._cancelToken = cancelToken;
@@ -197,7 +193,6 @@ Component({
         if (err?.message === 'request:abort') return;
         wx.showToast({ title: err?.message || (this as any).$t('noteItem.deleteFail'), icon: 'none' });
       } finally {
-        (this as any)._deleting = false;
         if ((this as any)._cancelToken === cancelToken) {
           (this as any)._cancelToken = null;
         }

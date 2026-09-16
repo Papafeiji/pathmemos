@@ -2,6 +2,7 @@ package autorecord
 
 import (
 	"fmt"
+	"log/slog"
 
 	"net/http"
 	"strconv"
@@ -43,7 +44,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userID := middleware.UserID(ctx)
 
-	isVip := h.service.IsVIPRelaxed(ctx, userID)
+	isVip := h.service.HasActiveVIP(ctx, userID)
 	if !isVip {
 		middleware.JSON(w, r, http.StatusOK, map[string]interface{}{"enabled": false})
 		return
@@ -67,12 +68,12 @@ func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		Enabled bool `json:"enabled"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 
-	if req.Enabled && !h.service.IsVIPRelaxed(ctx, userID) {
-		middleware.JSONError(w, r, errors.HTTPStatus(errors.BizNotVip), errors.CodeBadRequest, "vip required", errors.BizNotVip)
+	if req.Enabled && !h.service.HasActiveVIP(ctx, userID) {
+		middleware.JSONBizError(w, r, errors.BizNotVip, "vip required")
 		return
 	}
 
@@ -88,7 +89,8 @@ func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{})
 }
 
-// TouchActive records that the user is active and resets today's abnormal alert window.
+// TouchActive 记录用户活跃时间；异常告警候选 SQL 据此跳过最近活跃用户（last_active_at 条件），
+// 并不直接重置 abnormal_alert_sent_at（PPJ-C02 注释与实现对齐）。
 func (h *Handler) TouchActive(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userID := middleware.UserID(ctx)
@@ -106,8 +108,8 @@ func (h *Handler) UploadTrajectories(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userID := middleware.UserID(ctx)
 
-	if !h.service.IsVIPRelaxed(ctx, userID) {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "vip required", errors.BizNotVip)
+	if !h.service.HasActiveVIP(ctx, userID) {
+		middleware.JSONBizError(w, r, errors.BizNotVip, "vip required")
 		return
 	}
 
@@ -120,9 +122,11 @@ func (h *Handler) UploadTrajectories(w http.ResponseWriter, r *http.Request) {
 			Lon        *float64 `json:"lon"`
 			RecordedAt string   `json:"recordedAt"`
 		} `json:"points"`
+		// BatchSeq 由前端生成，仅用于观测（PPJ-C04）；服务端幂等以自然键唯一索引为准。
+		BatchSeq int `json:"batchSeq"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, maxUploadBodySize); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 
@@ -183,6 +187,13 @@ func (h *Handler) UploadTrajectories(w http.ResponseWriter, r *http.Request) {
 		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to upload trajectory")
 		return
 	}
+
+	// OPS-LOG：轨迹上报审计日志（用于数据问题复盘）。
+	slog.InfoContext(ctx, "auto record trajectories uploaded",
+		slog.String("user_id", userID),
+		slog.Int("count", len(req.Points)),
+		slog.Int("batch_seq", req.BatchSeq),
+	)
 
 	middleware.JSON(w, r, http.StatusOK, map[string]interface{}{})
 }

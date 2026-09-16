@@ -50,7 +50,7 @@ func (m *OpenAuthMiddleware) Handler(next http.Handler) http.Handler {
 			userID, err := m.sessions.Get(r.Context(), sessionID)
 			if err != nil {
 				if stderrors.Is(err, redis.Nil) {
-					JSONError(w, r, http.StatusUnauthorized, errors.BizSessionInvalid, "invalid or expired session")
+					JSONBizError(w, r, errors.BizSessionInvalid, "invalid or expired session")
 					return
 				}
 
@@ -82,7 +82,7 @@ func (m *OpenAuthMiddleware) Handler(next http.Handler) http.Handler {
 			}
 		}
 
-		JSONError(w, r, http.StatusUnauthorized, errors.BizSessionInvalid, "unauthorized")
+		JSONBizError(w, r, errors.BizSessionInvalid, "unauthorized")
 	})
 }
 

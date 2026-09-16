@@ -87,7 +87,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.ContentLength > MaxTotalSize {
-		middleware.JSONError(w, r, errors.HTTPStatus(errors.BizFileSizeExceeded), errors.CodeBadRequest, "request body too large")
+		middleware.JSONBizError(w, r, errors.BizFileSizeExceeded, "request body too large")
 		return
 	}
 
@@ -149,13 +149,13 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 			rollback()
 			switch err {
 			case errInvalidFileType:
-				middleware.JSONError(w, r, errors.HTTPStatus(errors.BizInvalidFileType), errors.CodeBadRequest, err.Error())
+				middleware.JSONBizError(w, r, errors.BizInvalidFileType, err.Error())
 			case errStorageQuotaExceeded:
-				middleware.JSONError(w, r, errors.HTTPStatus(errors.BizUserImageStorageLimitExceeded), errors.CodeBadRequest, err.Error(), errors.BizUserImageStorageLimitExceeded)
+				middleware.JSONBizError(w, r, errors.BizUserImageStorageLimitExceeded, err.Error())
 			case errFileTooLarge:
-				middleware.JSONError(w, r, errors.HTTPStatus(errors.BizFileSizeExceeded), errors.CodeBadRequest, err.Error())
+				middleware.JSONBizError(w, r, errors.BizFileSizeExceeded, err.Error())
 			case errTotalSizeExceeded:
-				middleware.JSONError(w, r, errors.HTTPStatus(errors.BizFileSizeExceeded), errors.CodeBadRequest, err.Error())
+				middleware.JSONBizError(w, r, errors.BizFileSizeExceeded, err.Error())
 			default:
 				middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to upload file")
 			}
@@ -240,7 +240,7 @@ func (h *Handler) checkStorageLimit(ctx context.Context, w http.ResponseWriter, 
 	}
 
 	if used >= limit {
-		middleware.JSONError(w, r, errors.HTTPStatus(errors.BizUserImageStorageLimitExceeded), errors.CodeBadRequest, "user image storage limit exceeded", errors.BizUserImageStorageLimitExceeded)
+		middleware.JSONBizError(w, r, errors.BizUserImageStorageLimitExceeded, "user image storage limit exceeded")
 		return stderrors.New("user image storage limit exceeded")
 	}
 

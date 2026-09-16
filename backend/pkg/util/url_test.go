@@ -14,9 +14,9 @@ func TestIsForbiddenIP(t *testing.T) {
 		{"10.1.2.3", true},
 		{"192.168.1.1", true},
 		{"169.254.1.1", true},
-		{"100.64.0.1", true},   // CGNAT（M5）
-		{"192.0.2.10", true},   // 文档网段（M5）
-		{"198.18.0.1", true},   // benchmark（M5）
+		{"100.64.0.1", true}, // CGNAT（M5）
+		{"192.0.2.10", true}, // 文档网段（M5）
+		{"198.18.0.1", true}, // benchmark（M5）
 		{"8.8.8.8", false},
 		{"223.5.5.5", false},
 	}

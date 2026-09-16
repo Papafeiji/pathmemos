@@ -52,7 +52,7 @@ func main() {
 	}
 	defer rdb.Close() //nolint:errcheck
 
-	lock := db.NewLock(rdb)
+	lock := db.NewAdvisoryLock(pgPool)
 	sessions := mw.NewSessionManager(rdb)
 	familyService := family.NewService(pool, rdb, lock, "")
 

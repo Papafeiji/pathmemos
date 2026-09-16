@@ -5,15 +5,9 @@ import { getPendingLinkId, setPendingLinkId, clearPendingLinkId } from '../../ut
 import themeBehavior from '../../behaviors/theme';
 import i18nBehavior from '../../behaviors/i18n';
 
-const isAlreadyInFamilyError = (error: any): boolean => {
-  const bizCode = error?.data?.biz_code || '';
-  return bizCode === 'ALREADY_IN_TARGET_FAMILY';
-};
-
 Page({
   behaviors: [themeBehavior, i18nBehavior],
   data: {
-    isGuide: false,
     isLogin: false,
     familyList: [] as any[],
     ownerId: '',
@@ -51,7 +45,7 @@ Page({
 
   onLoad(option: any) {
     (this as any)._isDestroyed = false;
-    this._safeSetData({ isGuide: !!option.isGuide, shareReady: false });
+    this._safeSetData({ shareReady: false });
     if (option.linkId) {
       setPendingLinkId(option.linkId);
     }
@@ -208,12 +202,7 @@ Page({
       }
       if ((this as any)._isDestroyed || (this as any)._isHidden) return;
       wx.hideLoading();
-      if (isAlreadyInFamilyError(error)) {
-        clearPendingLinkId();
-        wx.showToast({ title: (this as any).$t('family.joined'), icon: 'success' });
-      } else {
-        wx.showToast({ title: error?.data?.msg || (this as any).$t('family.actionFail'), icon: 'none' });
-      }
+      wx.showToast({ title: error?.data?.msg || (this as any).$t('family.actionFail'), icon: 'none' });
     } finally {
       if (!(this as any)._isDestroyed && !(this as any)._isHidden && !aborted) {
         this.fetch().catch(() => {});

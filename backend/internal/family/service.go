@@ -19,24 +19,14 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// deleteAccountLockTTL 注销锁（用户级 + 家庭级）TTL。注销事务为纯 DB 操作，亚秒级完成；
-// 物理文件删除、session 清理等外部 IO 均在事务提交后由调用方执行，锁内无外部 IO。
-// 按 5.19「TTL 选型原则（简单优先）」取 120s：为纯 DB 事务提供充裕余量，同时满足 ≤120s
-// 免续期条件，不引入续期 goroutine。
-const deleteAccountLockTTL = 120 * time.Second
-
-// familyLockTTL 家庭级分布式锁 TTL。家庭变更（加入/离开/移除/解散）为纯 DB 操作，
-// 按 5.19「TTL 选型原则（简单优先）」取 120s，与审计阈值表一致。
-const familyLockTTL = 120 * time.Second
-
 type Service struct {
 	pool          *db.Pool
 	rdb           *redis.Client
-	lock          *db.Lock
+	lock          db.Locker
 	defaultAvatar string
 }
 
-func NewService(pool *db.Pool, rdb *redis.Client, lock *db.Lock, defaultAvatarURL string) *Service {
+func NewService(pool *db.Pool, rdb *redis.Client, lock db.Locker, defaultAvatarURL string) *Service {
 	return &Service{pool: pool, rdb: rdb, lock: lock, defaultAvatar: defaultAvatarURL}
 }
 
@@ -232,7 +222,7 @@ func (s *Service) JoinFamily(ctx context.Context, userID, targetFamilyID string)
 	}
 	sort.Strings(lockKeys)
 
-	ok, lockTokens, err := s.lock.TryLocks(ctx, lockKeys, familyLockTTL)
+	ok, lockTokens, err := s.lock.TryLocks(ctx, lockKeys)
 	if err != nil {
 		return fmt.Errorf("acquire locks: %w", err)
 	}
@@ -296,7 +286,7 @@ func (s *Service) JoinFamily(ctx context.Context, userID, targetFamilyID string)
 func (s *Service) joinFamilyTx(ctx context.Context, q *sqlc.Queries, user sqlc.GetUserByIDRow, targetFamilyID string, isOwnerOfSource bool) error {
 	if isOwnerOfSource {
 		// 设计决策：家庭 owner 加入别人家庭时，会把源家庭全体成员一起迁入目标家庭并解散源家庭
-		//（家庭合并语义）。/family/invite-link/join 与 /invite/join-family 共用此实现，
+		//（家庭合并语义）。/family/invite-link/join 使用此实现，
 		// owner 扫码加入即触发整家合并——这是预期行为，非越权/误删。
 
 		sourceFamilyID := util.ToString(user.CurrentFamilyID)
@@ -434,7 +424,7 @@ func (s *Service) LeaveFamily(ctx context.Context, userID string) error {
 
 	familyID := util.ToString(user.CurrentFamilyID)
 	lockKeys := []string{"lock:family:" + familyID}
-	ok, lockTokens, err := s.lock.TryLocks(ctx, lockKeys, familyLockTTL)
+	ok, lockTokens, err := s.lock.TryLocks(ctx, lockKeys)
 	if err != nil {
 		return fmt.Errorf("acquire locks: %w", err)
 	}
@@ -475,7 +465,7 @@ func (s *Service) RemoveMember(ctx context.Context, ownerID, targetUserID string
 	}
 
 	lockKeys := []string{"lock:family:" + familyID}
-	ok, lockTokens, err := s.lock.TryLocks(ctx, lockKeys, familyLockTTL)
+	ok, lockTokens, err := s.lock.TryLocks(ctx, lockKeys)
 	if err != nil {
 		return fmt.Errorf("acquire locks: %w", err)
 	}
@@ -525,7 +515,7 @@ func (s *Service) DissolveFamily(ctx context.Context, ownerID string) error {
 	}
 
 	lockKeys := []string{"lock:family:" + familyID}
-	ok, lockTokens, err := s.lock.TryLocks(ctx, lockKeys, familyLockTTL)
+	ok, lockTokens, err := s.lock.TryLocks(ctx, lockKeys)
 	if err != nil {
 		return fmt.Errorf("acquire locks: %w", err)
 	}
@@ -694,7 +684,7 @@ func (s *Service) dissolveFamilyTx(ctx context.Context, q *sqlc.Queries, familyI
 func (s *Service) DeleteAccount(ctx context.Context, userID string) (*AccountCleanupInfo, error) {
 	// 用户级锁防止同一用户并发注销产生竞态；必须在读取用户状态前获取。
 	deleteAccountLockKey := "lock:delete_account:" + userID
-	ok, deleteAccountLockToken, err := s.lock.TryLock(ctx, deleteAccountLockKey, deleteAccountLockTTL)
+	ok, deleteAccountLockToken, err := s.lock.TryLock(ctx, deleteAccountLockKey)
 	if err != nil {
 		return nil, fmt.Errorf("acquire delete account lock: %w", err)
 	}
@@ -710,7 +700,7 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (*AccountCle
 	// 在用户级锁保护下读取用户状态，用于确定需要获取哪些家庭锁以及驱动事务决策。
 	// 家庭级锁随后按此快照获取；JoinFamily/LeaveFamily 等操作不持有用户级注销锁，
 	// 因此存在极窄窗口使家庭关系在读取后发生变化。该窗口由 DB 唯一约束与
-	// WithTxDeferrable 重试兜底，不引入锁后重读等复杂机制（AGENTS.md §4.1 简单优先）。
+	// WithTxDeferrable 重试兜底，不引入锁后重读等复杂机制（AGENTS.md §二「简单优先」）。
 	user, err := s.pool.Queries().GetUserByID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user: %w", err)
@@ -729,7 +719,7 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (*AccountCle
 		familyLockKeys = append(familyLockKeys, "lock:family:"+personalFamilyID)
 	}
 	if len(familyLockKeys) > 0 {
-		familyLocksOk, familyLockTokens, err := s.lock.TryLocks(ctx, familyLockKeys, deleteAccountLockTTL)
+		familyLocksOk, familyLockTokens, err := s.lock.TryLocks(ctx, familyLockKeys)
 		if err != nil {
 			return nil, fmt.Errorf("acquire family lock: %w", err)
 		}
@@ -744,8 +734,8 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (*AccountCle
 	}
 
 	// 注销事务（含家庭解散）为纯 DB 操作，亚秒级完成；物理文件删除、session 清理等外部 IO
-	// 均在事务提交后由调用方执行，锁内无外部 IO。按 5.19「TTL 选型原则（简单优先）」，纯 DB
-	// 临界区使用 TTL ≤120s 免除续期，不引入续期 goroutine。
+	// 均在事务提交后由调用方执行，锁内无外部 IO。advisory lock 无 TTL、连接断开自动释放，
+	// 不引入续期机制。
 
 	var txPaths []string
 	var txAffectedUserIDs []string
@@ -756,8 +746,8 @@ func (s *Service) DeleteAccount(ctx context.Context, userID string) (*AccountCle
 		var localPaths []string
 		var localAffectedUserIDs []string
 
-		// 不加 FOR UPDATE：Redis 用户级锁与家庭级锁已保证加锁后没有其他并发请求能改变该用户的
-		// 家庭归属，满足 AGENTS.md §4.1「禁止锁后重读」。并发 DB 行更新由 WithTxDeferrable 重试兜底。
+		// 不加 FOR UPDATE：用户级 advisory 锁与家庭级 advisory 锁已保证加锁后没有其他并发请求能改变该用户的
+		// 家庭归属（02d §6.1「锁后不重读」）。并发 DB 行更新由 WithTxDeferrable 重试兜底。
 
 		// 以用户级锁下读取的家庭关系为准；家庭级锁按该快照获取。
 		var familyIDsToClean []string

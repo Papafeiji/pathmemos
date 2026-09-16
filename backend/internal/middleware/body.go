@@ -2,12 +2,26 @@ package middleware
 
 import (
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net/http"
+
+	apperrors "papafeiji/backend/pkg/errors"
 )
 
 const DefaultMaxBodySize int64 = 4096
+
+// JSONBodyError 将 ReadJSONBody 的失败统一映射为规范 envelope：
+// 超过 maxBytes → 413 + code=4130；其余（JSON 非法/读取失败）→ 400 + code=4000（ADR-0008）。
+func JSONBodyError(w http.ResponseWriter, r *http.Request, err error) {
+	var maxErr *http.MaxBytesError
+	if stderrors.As(err, &maxErr) {
+		JSONError(w, r, http.StatusRequestEntityTooLarge, apperrors.CodeRequestEntityTooLarge, "request body too large")
+		return
+	}
+	JSONError(w, r, http.StatusBadRequest, apperrors.CodeBadRequest, "invalid request body")
+}
 
 func ReadJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}, maxBytes int64) error {
 	return readJSONBody(w, r, dst, maxBytes, false)

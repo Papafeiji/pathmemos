@@ -3,23 +3,24 @@ package errors
 
 import "net/http"
 
+// code 固定枚举：语义标识符一律放 biz_code（见 docs/spec/03-api.md §3）。
 const (
-	CodeSuccess       = "0000"
-	CodeBadRequest    = "4000"
-	CodeNotFound      = "4040"
-	CodeUnauthorized  = "4010"
-	CodeForbidden     = "4030"
-	CodeInternalError = "5001"
+	CodeSuccess               = "0000"
+	CodeBadRequest            = "4000"
+	CodeUnauthorized          = "4010"
+	CodeForbidden             = "4030"
+	CodeNotFound              = "4040"
+	CodeConflict              = "4090"
+	CodeRequestEntityTooLarge = "4130"
+	CodeTooManyRequests       = "4290"
+	CodeInternalError         = "5001"
 )
 
 const (
-	BizTokenExpired                  = "1006"
 	BizSessionInvalid                = "SESSION_INVALID"
-	BizLoginConflict                 = "LOGIN_CONFLICT"
 	BizPhoneAlreadyBound             = "PHONE_ALREADY_BOUND"
 	BizFamilyNotFound                = "FAMILY_NOT_FOUND"
 	BizTargetIsPersonalFamily        = "TARGET_IS_PERSONAL_FAMILY"
-	BizAlreadyInTargetFamily         = "ALREADY_IN_TARGET_FAMILY"
 	BizOwnerCannotLeaveFamily        = "OWNER_CANNOT_LEAVE_FAMILY"
 	BizFamilyFull                    = "FAMILY_FULL"
 	BizCannotRemoveSelf              = "CANNOT_REMOVE_SELF"
@@ -28,8 +29,6 @@ const (
 	BizFreeVipAlreadyClaimed         = "FREE_VIP_ALREADY_CLAIMED"
 	BizTrialVipAlreadyClaimed        = "TRIAL_VIP_ALREADY_CLAIMED"
 	BizOrderNotFound                 = "ORDER_NOT_FOUND"
-	BizVIPNotFound                   = "VIP_NOT_FOUND"
-	BizOrderNotPending               = "ORDER_NOT_PENDING"
 	BizAlreadyInFamily               = "ALREADY_IN_FAMILY"
 	BizOperationInProgress           = "OPERATION_IN_PROGRESS"
 	BizInvalidFileType               = "INVALID_FILE_TYPE"
@@ -38,27 +37,44 @@ const (
 	BizInvalidColorFormat            = "INVALID_COLOR_FORMAT"
 	BizTextTooLong                   = "TEXT_TOO_LONG"
 	BizInvalidCoordinates            = "INVALID_COORDINATES"
-	BizNicknameInvalid               = "NICKNAME_INVALID"
 	BizAIDailyQuotaExceeded          = "AI_DAILY_QUOTA_EXCEEDED"
-	BizNotInNormalFamily             = "NOT_IN_NORMAL_FAMILY"
-	BizAlreadyInOtherFamily          = "ALREADY_IN_OTHER_FAMILY"
 	BizRateLimited                   = "RATE_LIMITED"
 )
 
+// HTTPStatus 是 biz_code 到 HTTP 状态的唯一映射。
 func HTTPStatus(bizCode string) int {
 	switch bizCode {
-	case BizFamilyNotFound, BizOrderNotFound, BizVIPNotFound:
+	case BizFamilyNotFound, BizOrderNotFound:
 		return http.StatusNotFound
-	case BizTokenExpired, BizSessionInvalid:
-		// B2-16：凭证过期语义统一映射 401（此前默认落到 400）。
+	case BizSessionInvalid:
+		// 凭证过期语义统一映射 401。
 		return http.StatusUnauthorized
 	case BizTargetIsPersonalFamily, BizOwnerCannotLeaveFamily, BizCannotRemoveSelf, BizCannotRemoveOwner, BizNotVip:
 		return http.StatusForbidden
-	case BizLoginConflict, BizPhoneAlreadyBound, BizAlreadyInTargetFamily, BizOrderNotPending, BizAlreadyInFamily, BizFamilyFull, BizFreeVipAlreadyClaimed, BizTrialVipAlreadyClaimed, BizAlreadyInOtherFamily:
+	case BizPhoneAlreadyBound, BizAlreadyInFamily, BizFamilyFull, BizFreeVipAlreadyClaimed, BizTrialVipAlreadyClaimed:
 		return http.StatusConflict
-	case BizOperationInProgress, BizRateLimited:
+	case BizOperationInProgress, BizRateLimited, BizAIDailyQuotaExceeded:
 		return http.StatusTooManyRequests
 	default:
 		return http.StatusBadRequest
+	}
+}
+
+// CodeForBiz 返回 biz_code 对应的固定 code 枚举；与 HTTPStatus 同源，保证
+// 「同一 biz_code 全端点同一 HTTP 状态 + 同一 code」。
+func CodeForBiz(bizCode string) string {
+	switch bizCode {
+	case BizSessionInvalid:
+		return CodeUnauthorized
+	case BizFamilyNotFound, BizOrderNotFound:
+		return CodeNotFound
+	case BizTargetIsPersonalFamily, BizOwnerCannotLeaveFamily, BizCannotRemoveSelf, BizCannotRemoveOwner, BizNotVip:
+		return CodeForbidden
+	case BizPhoneAlreadyBound, BizAlreadyInFamily, BizFamilyFull, BizFreeVipAlreadyClaimed, BizTrialVipAlreadyClaimed:
+		return CodeConflict
+	case BizOperationInProgress, BizRateLimited, BizAIDailyQuotaExceeded:
+		return CodeTooManyRequests
+	default:
+		return CodeBadRequest
 	}
 }

@@ -25,7 +25,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/redis/go-redis/v9"
 )
 
 const maxUserRequestBodySize = 8 << 10 // 8KB
@@ -34,19 +33,17 @@ type Handler struct {
 	router        chi.Router
 	pool          *db.Pool
 	bgPool        *db.Pool
-	rdb           *redis.Client
 	vipService    vip.InfoProvider
 	avatarService *avatar.Service
 	storage       *file.Storage
 	defaultAvatar string
 }
 
-func NewHandlerWithBackgroundPool(router chi.Router, pool *db.Pool, bgPool *db.Pool, rdb *redis.Client, vipService vip.InfoProvider, avatarService *avatar.Service, storage *file.Storage, defaultAvatarURL string) *Handler {
+func NewHandlerWithBackgroundPool(router chi.Router, pool *db.Pool, bgPool *db.Pool, vipService vip.InfoProvider, avatarService *avatar.Service, storage *file.Storage, defaultAvatarURL string) *Handler {
 	return &Handler{
 		router:        router,
 		pool:          pool,
 		bgPool:        bgPool,
-		rdb:           rdb,
 		vipService:    vipService,
 		avatarService: avatarService,
 		storage:       storage,
@@ -101,7 +98,7 @@ func (h *Handler) UpdateAvatar(w http.ResponseWriter, r *http.Request) {
 		FileID *string `json:"fileId"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, maxUserRequestBodySize); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 	if req.FileID == nil || *req.FileID == "" {
@@ -182,7 +179,7 @@ func (h *Handler) UpdateNickname(w http.ResponseWriter, r *http.Request) {
 		NickName string `json:"nickName"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, maxUserRequestBodySize); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 
@@ -212,7 +209,7 @@ func (h *Handler) UpdateLang(w http.ResponseWriter, r *http.Request) {
 		Lang string `json:"lang"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, maxUserRequestBodySize); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 
@@ -315,7 +312,7 @@ func (h *Handler) UpdateCommonAddressName(w http.ResponseWriter, r *http.Request
 		NewName string `json:"newName"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, maxUserRequestBodySize); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 

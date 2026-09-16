@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"papafeiji/backend/internal/config"
 	"papafeiji/backend/internal/db"
@@ -65,7 +66,7 @@ func (h *Handler) Request(w http.ResponseWriter, r *http.Request) {
 		Env   int32  `json:"env"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 	if req.VipID == "" {
@@ -74,6 +75,13 @@ func (h *Handler) Request(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Env != 0 && req.Env != 1 {
 		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "env must be 0 or 1")
+		return
+	}
+	// 沙箱闸门：默认只允许现网(env=0)。仅联调环境显式设置 PAYMENT_ALLOW_SANDBOX=1 才放行 env=1，
+	// 防止生产环境用沙箱签名下单并借沙箱发货回调免实付领取 VIP。
+	if req.Env == 1 && !h.cfg.PaymentAllowSandbox {
+		slog.WarnContext(ctx, "sandbox virtual pay requested but disabled", slog.String("user_id", userID))
+		middleware.JSONError(w, r, http.StatusForbidden, errors.CodeForbidden, "sandbox payment is disabled")
 		return
 	}
 
@@ -104,7 +112,7 @@ func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 		OutTradeNo string `json:"outTradeNo"`
 	}
 	if err := middleware.ReadJSONBody(w, r, &req, 4096); err != nil {
-		middleware.JSONError(w, r, http.StatusBadRequest, errors.CodeBadRequest, "invalid request body")
+		middleware.JSONBodyError(w, r, err)
 		return
 	}
 	if req.OutTradeNo == "" {
@@ -126,7 +134,7 @@ func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 		order, err := h.pool.Queries().GetOrderByOutTradeNo(ctx, req.OutTradeNo)
 		if err != nil {
 			if stderrors.Is(err, pgx.ErrNoRows) {
-				middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOrderNotFound), errors.CodeBadRequest, "order not found")
+				middleware.JSONBizError(w, r, errors.BizOrderNotFound, "order not found")
 				return
 			}
 			slog.ErrorContext(ctx, "failed to get order on cancel", slog.Any("error", err))
@@ -134,7 +142,7 @@ func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !order.UserID.Valid || order.UserID.String != userID {
-			middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOrderNotFound), errors.CodeBadRequest, "order not found")
+			middleware.JSONBizError(w, r, errors.BizOrderNotFound, "order not found")
 			return
 		}
 		if order.State != "pending" {
@@ -162,8 +170,18 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	order, err := h.pool.Queries().GetOrderByOutTradeNo(ctx, outTradeNo)
-	if err != nil || !order.UserID.Valid || order.UserID.String != userID {
-		middleware.JSONError(w, r, errors.HTTPStatus(errors.BizOrderNotFound), errors.CodeBadRequest, "order not found")
+	if err != nil {
+		if stderrors.Is(err, pgx.ErrNoRows) {
+			middleware.JSONBizError(w, r, errors.BizOrderNotFound, "order not found")
+			return
+		}
+		// VP-P2-01：真实 DB 错误不再伪装成「订单不存在」404，按 500 + 日志暴露故障。
+		slog.ErrorContext(ctx, "failed to get order status", slog.Any("error", err))
+		middleware.JSONError(w, r, http.StatusInternalServerError, errors.CodeInternalError, "failed to get order status")
+		return
+	}
+	if !order.UserID.Valid || order.UserID.String != userID {
+		middleware.JSONBizError(w, r, errors.BizOrderNotFound, "order not found")
 		return
 	}
 
@@ -255,6 +273,21 @@ func (h *Handler) Notify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slog.InfoContext(ctx, "payment notify decrypted", slog.String("receive_id", receiveID))
+		// VP-P2-03：校验消息确实发往本小程序。虚拟支付属小程序，receive_id = 小程序 AppID
+		// （WECHAT_APPID / WechatAppID），不是公众号 AppID（WECHAT_MP_APPID）。
+		// 防止 Token/AESKey 复用或泄露时伪造任意应用的回调；未配置时跳过。
+		if !validReceiveID(h.cfg.WechatAppID, receiveID) {
+			slog.ErrorContext(ctx, "payment notify rejected: receive_id mismatch",
+				slog.String("alert", "payment_notify_receive_id_mismatch"),
+				slog.String("receive_id", receiveID))
+			// 返回非 2xx 触发微信重试：若属 AppID 配置错误导致误拒，修复配置后重试仍可发货，
+			// 避免静默漏发；该 alert 同时进入监控。
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusInternalServerError)
+			//nolint:errcheck
+			_, _ = w.Write([]byte(`{"ErrCode":-1,"ErrMsg":"internal error"}`))
+			return
+		}
 		if err := json.Unmarshal([]byte(plaintext), &payload); err != nil {
 			slog.ErrorContext(ctx, "payment notify parse decrypted body failed",
 				slog.String("alert", "alert:payment_parse_failed"),
@@ -263,35 +296,13 @@ func (h *Handler) Notify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// 明文模式：fail-closed 验签——签名缺失或校验失败一律不处理 body。
-		// 签名算法为微信消息签名（sort([token, timestamp, nonce]) 后 SHA1）。
-		// 拒绝时仍返回固定成功响应以终止微信重试，并记录带 alert 的日志供监控发现异常推送。
-		if signature == "" || timestamp == "" || nonce == "" {
-			slog.WarnContext(ctx, "payment notify rejected: missing signature params",
-				slog.String("alert", "payment_notify_missing_signature"),
-				slog.Bool("has_signature", signature != ""),
-				slog.Bool("has_timestamp", timestamp != ""),
-				slog.Bool("has_nonce", nonce != ""))
-			writeNotifyJSON(w)
-			return
-		}
-		if h.cfg.WechatVirtualCallbackToken == "" {
-			slog.ErrorContext(ctx, "payment notify rejected: WechatVirtualCallbackToken not configured",
-				slog.String("alert", "payment_notify_token_missing"))
-			writeNotifyJSON(w)
-			return
-		}
-		if !wechatcrypto.CheckSignature(h.cfg.WechatVirtualCallbackToken, signature, timestamp, nonce) {
-			slog.WarnContext(ctx, "payment notify rejected: signature verification failed",
-				slog.String("alert", "payment_notify_bad_signature"))
-			writeNotifyJSON(w)
-			return
-		}
-		if err := json.Unmarshal(body, &payload); err != nil {
-			slog.ErrorContext(ctx, "payment notify parse body failed", slog.Any("error", err), slog.String("alert", "alert:payment_parse_failed"))
-			writeNotifyJSON(w)
-			return
-		}
+		// 明文模式已禁用：明文签名 sha1(sort([token, timestamp, nonce])) 不绑定消息体，
+		// 捕获一组合法签名三元组即可伪造任意 out_trade_no 的支付通知（资金安全风险）。
+		// 强制安全模式（加密推送），拒绝明文；返回固定成功响应以终止微信重试并记录告警。
+		slog.WarnContext(ctx, "payment notify rejected: plaintext mode not allowed",
+			slog.String("alert", "payment_notify_plaintext_rejected"))
+		writeNotifyJSON(w)
+		return
 	}
 
 	slog.InfoContext(ctx, "payment notify received",
@@ -326,6 +337,13 @@ func (h *Handler) Notify(w http.ResponseWriter, r *http.Request) {
 // extractEncryptedCiphertext 从安全模式回调 body 中提取密文：
 // 优先尝试 JSON 包装（数据格式=JSON 时微信发送 {"encrypt": "..."} 或 {"Encrypt": "..."}），
 // 再尝试 XML 包装（<xml><Encrypt>...</Encrypt></xml>）。非密文包装返回空串。
+// validReceiveID 判断解密出来的 receive_id 是否发往本小程序。未配置期望 AppID 时
+// （开源/私有化未填 WECHAT_APPID）跳过校验，避免误拒。
+func validReceiveID(expected, got string) bool {
+	expected = strings.TrimSpace(expected)
+	return expected == "" || expected == got
+}
+
 func extractEncryptedCiphertext(body []byte) string {
 	var jsonEnv map[string]interface{}
 	if err := json.Unmarshal(body, &jsonEnv); err == nil {

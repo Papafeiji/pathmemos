@@ -37,8 +37,10 @@ import (
 	"papafeiji/backend/internal/mcp"
 	mw "papafeiji/backend/internal/middleware"
 	"papafeiji/backend/internal/migration"
+	"papafeiji/backend/internal/opslog"
 	"papafeiji/backend/internal/payment"
 	"papafeiji/backend/internal/pkg/safe"
+	"papafeiji/backend/internal/purge"
 	"papafeiji/backend/internal/push"
 	"papafeiji/backend/internal/redis"
 	"papafeiji/backend/internal/system"
@@ -70,6 +72,27 @@ func run() error {
 
 	logger := newLogger(cfg.LogLevel)
 	slog.SetDefault(logger)
+
+	// FP-P2-03：SaaS 公众号密钥不完整时不会启动失败，但公众号渠道会静默半可用；
+	// 启动时显式告警便于排查（不 fail-closed，避免非核心渠道阻断主服务）。
+	if cfg.DeploymentMode == "saas" {
+		var missingMP []string
+		if cfg.WechatMPAppID == "" {
+			missingMP = append(missingMP, "WECHAT_MP_APPID")
+		}
+		if cfg.WechatMPSecret == "" {
+			missingMP = append(missingMP, "WECHAT_MP_SECRET")
+		}
+		if cfg.WechatMPGhID == "" {
+			missingMP = append(missingMP, "WECHAT_MP_GHID")
+		}
+		if cfg.WechatEncodingAESKey == "" {
+			missingMP = append(missingMP, "WECHAT_ENCODING_AES_KEY")
+		}
+		if len(missingMP) > 0 {
+			logger.Warn("wechat mp config incomplete, official-account channel may be partially unavailable", slog.Any("missing", missingMP))
+		}
+	}
 
 	pgPool, err := db.NewPool(cfg.DatabaseURL)
 	if err != nil {
@@ -114,7 +137,7 @@ func run() error {
 		}
 	}
 
-	sysCfg, err := config.LoadSysConfig(ctx, pool.Queries(), cfg)
+	sysCfg, err := config.BuildSysConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("load sys config: %w", err)
 	}
@@ -123,8 +146,8 @@ func run() error {
 	// 轨迹图标会传给腾讯静态地图（icon: 参数），相对路径外部服务无法抓取，
 	// 此处不再覆盖为相对路径。
 
-	lock := db.NewLock(rdb)
-	sysCfgLoader := config.NewSysConfigLoader(pool.Queries(), cfg)
+	lock := db.NewAdvisoryLock(pgPool)
+	sysCfgLoader := config.NewSysConfigLoader(cfg)
 
 	vipService := vip.NewService(pool)
 
@@ -144,13 +167,29 @@ func run() error {
 		}
 		storage.WithOSS(file.NewOSSStore(ossBucket, cfg.OSSPublicURLBase()))
 	}
+
+	// ADR-0013：已删对象边缘缓存批量收敛。默认关闭；开启后 OSS 对象删除成功时把
+	// 公开 URL 记入 Redis 队列，由后台任务定期分批调用阿里云 CDN 刷新接口。
+	var purgeQueue *purge.Queue
+	var cdnPurger *purge.Purger
+	if cfg.CDNRefreshEnabled && rdb != nil && storage.OSSConfigured() {
+		purgeQueue = purge.NewQueue(rdb)
+		cdnPurger = purge.NewPurger(cfg.OSSAccessKeyID, cfg.OSSAccessKeySecret)
+		storage.WithOSSDeleteHook(func(objectURL string) {
+			hookCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := purgeQueue.Record(hookCtx, objectURL); err != nil {
+				slog.Warn("record deleted url for purge failed", slog.Any("error", err))
+			}
+		})
+	}
 	avatarService := avatar.NewService(pool, storage)
-	diaryService := diary.NewService(pool, rdb, lock, vipService, storage, sysCfg, cfg.TencentMapKeys)
+	diaryService := diary.NewService(pool, rdb, lock, storage, sysCfg, cfg.TencentMapKeys)
 	pushService := push.NewService(pool, cfg, rdb, wxMPClient, vipService)
 	diaryService.SetNewPlaceAlerter(pushService)
 	autoRecordService := autorecord.NewService(pool, rdb, cfg, diaryService, pushService)
 	bgAutoRecordService := autorecord.NewService(bgPool, rdb, cfg, diaryService, pushService)
-	jobRunner := jobs.NewRunner(pool, bgPool, rdb, bgAutoRecordService, storage, pushService, cfg)
+	jobRunner := jobs.NewRunner(pool, bgPool, bgAutoRecordService, storage, pushService, cfg, purgeQueue, cdnPurger)
 	jobRunner.Start(ctx)
 
 	httpRouter := chi.NewRouter()
@@ -159,6 +198,8 @@ func run() error {
 	httpRouter.Use(mw.LoggerMiddleware(logger))
 
 	healthLimiter := mw.NewIPRateLimiter(30, time.Minute, cfg.TrustedProxyCIDR)
+	httpRouter.With(healthLimiter.Handler).Get("/health/live", newLivenessHandler(&shuttingDown))
+	httpRouter.With(healthLimiter.Handler).Get("/health/ready", newHealthHandler(pool, rdb, &shuttingDown))
 	httpRouter.With(healthLimiter.Handler).Get("/health", newHealthHandler(pool, rdb, &shuttingDown))
 
 	apiRouter := chi.NewRouter()
@@ -169,15 +210,15 @@ func run() error {
 	publicRouter := chi.NewRouter()
 	publicRouter.Use(publicLimiter.Handler)
 
-	mcpHandler := mcp.NewHandler(apiRouter, pool, cfg, rdb)
+	mcpHandler := mcp.NewHandler(pool, cfg, rdb)
 
-	authHandler := auth.NewHandlerWithBackgroundPool(apiRouter, pool, bgPool, rdb, cfg, sessions, vipService, familyService, avatarService, storage, sysCfg.DefaultAvatarURL)
+	authHandler := auth.NewHandlerWithBackgroundPool(pool, bgPool, rdb, cfg, sessions, vipService, familyService, avatarService, storage, sysCfg.DefaultAvatarURL)
 	authHandler.RegisterPublic(publicRouter)
 
 	paymentHandler := payment.NewHandler(apiRouter, pool, cfg, vipService)
 	paymentHandler.RegisterPublic(publicRouter)
 
-	inviteHandler := invite.NewHandler(pool, rdb, familyService, authHandler.GetWechatClient(), storage, cfg)
+	inviteHandler := invite.NewHandler(pool, rdb, authHandler.GetWechatClient(), storage, cfg)
 	inviteHandler.RegisterPublic(publicRouter)
 
 	wxmpHandler := wxmp.NewHandler(apiRouter, pool, rdb, cfg, sysCfgLoader, wxMPClient, aiService)
@@ -202,13 +243,19 @@ func run() error {
 		} else {
 			r.Use(mw.NewSessionMiddleware(sessions).Handler)
 		}
+		// 鉴权后输出带 user_id 的访问日志，用于数据问题复盘（OPS-LOG）。
+		r.Use(mw.AccessLogMiddleware(logger))
 
 		authHandler.RegisterProtected(r)
 		// 账号注销单独注册，加 IP 限流 5 次/小时（绕过 session 认证后仍有必要防护）
 		accountDeleteLimiter := mw.NewIPRateLimiter(5, time.Hour, cfg.TrustedProxyCIDR)
 		r.With(accountDeleteLimiter.Handler).Delete("/auth/account", authHandler.DeleteAccount)
+		// A-FIX-04：手机号绑定每次都会调用微信 GetPhoneNumber（失败也计费/耗额度），
+		// 单独加 IP 限流 10 次/分钟，避免高频消耗微信额度（日限只拦成功绑定）。
+		bindPhoneLimiter := mw.NewIPRateLimiter(10, time.Minute, cfg.TrustedProxyCIDR)
+		r.With(bindPhoneLimiter.Handler).Post("/auth/phone/bind", authHandler.BindPhone)
 
-		userHandler := user.NewHandlerWithBackgroundPool(r, pool, bgPool, rdb, vipService, avatarService, storage, sysCfg.DefaultAvatarURL)
+		userHandler := user.NewHandlerWithBackgroundPool(r, pool, bgPool, vipService, avatarService, storage, sysCfg.DefaultAvatarURL)
 		userHandler.Register()
 
 		familyHandler := family.NewHandler(r, pool, rdb, lock, sysCfg.DefaultAvatarURL, vipService)
@@ -216,10 +263,14 @@ func run() error {
 
 		fileHandler := file.NewHandler(r, pool, bgPool, rdb, storage, cfg, vipService)
 		fileHandler.Register()
+		// FP-P2-02：上传限流（60 次/分钟/IP）。配额只按字节计，恶意用户可反复上传小图
+		// 在配额内制造海量 files 行，耗尽 DB 行/inode；限流先于超时中间件执行。
+		uploadLimiter := mw.NewIPRateLimiter(60, time.Minute, cfg.TrustedProxyCIDR)
 		fileHandler.RegisterUpload(
+			uploadLimiter.Handler,
 			func(next http.Handler) http.Handler {
 				// 5 分钟 < httpServer.WriteTimeout(310s)，确保超时 JSON 能返回客户端。
-				return http.TimeoutHandler(next, 5*time.Minute, `{"code":"5000","msg":"upload timeout"}`)
+				return http.TimeoutHandler(next, 5*time.Minute, `{"code":"5001","message":"upload timeout"}`)
 			},
 		)
 
@@ -242,8 +293,11 @@ func run() error {
 
 		inviteHandler.Register(r)
 
-		diaryHandler := diary.NewHandler(r, pool, vipService, storage, diaryService)
+		diaryHandler := diary.NewHandler(r, pool, vipService, diaryService)
 		diaryHandler.Register()
+
+		opslogHandler := opslog.NewHandler(r, pool)
+		opslogHandler.Register()
 	})
 
 	httpRouter.Mount("/", apiRouter)
@@ -252,6 +306,8 @@ func run() error {
 	sseRouter.Use(middleware.RequestID)
 	sseRouter.Use(mw.RecoveryMiddleware(logger))
 	sseRouter.Use(mw.LoggerMiddleware(logger))
+	sseRouter.With(healthLimiter.Handler).Get("/health/live", newLivenessHandler(&shuttingDown))
+	sseRouter.With(healthLimiter.Handler).Get("/health/ready", newHealthHandler(pool, rdb, &shuttingDown))
 	sseRouter.With(healthLimiter.Handler).Get("/health", newHealthHandler(pool, rdb, &shuttingDown))
 
 	// AI chat 成本最高的端点，加应用层 IP 限流作为防御纵深（主防护为日配额制）
@@ -264,6 +320,8 @@ func run() error {
 		} else {
 			r.Use(mw.NewSessionMiddleware(sessions).Handler)
 		}
+		// 鉴权后输出带 user_id 的访问日志，用于数据问题复盘（OPS-LOG）。
+		r.Use(mw.AccessLogMiddleware(logger))
 		r.Use(aiChatLimiter.Handler)
 		aiHandler := ai.NewHandler(r, aiService)
 		aiHandler.Register()
@@ -412,6 +470,21 @@ func newHealthHandler(pool *db.Pool, rdb *goredis.Client, shutdownFlag *atomic.B
 			lastRedisAlertAt.Store(0)
 		}
 
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(status) //nolint:errcheck
+	}
+}
+
+// newLivenessHandler 仅检查进程存活与关闭状态，不依赖 DB/Redis。
+func newLivenessHandler(shutdownFlag *atomic.Bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := map[string]string{"status": "ok"}
+		code := http.StatusOK
+		if shutdownFlag.Load() {
+			status["status"] = "shutting_down"
+			code = http.StatusServiceUnavailable
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(status) //nolint:errcheck

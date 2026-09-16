@@ -29,7 +29,6 @@ Page({
   data: {
     userAvatar: request.getAvatar(),
     baseInfo: request.getBaseInfo() || ({} as any),
-    familyConfig: {} as any,
     showNicknameDrawer: false,
     tempNickname: '',
     showOfficialAccountDialog: false,
@@ -134,13 +133,12 @@ Page({
       return;
     }
     // 按 FP063/FP076：昵称修改为普通业务，不做函数级防重入锁。
-    (this as any)._submitting = true;
     if ((this as any)._submitNicknameCancelToken) {
       try { (this as any)._submitNicknameCancelToken.cancel(); } catch {}
     }
     (this as any)._submitNicknameCancelToken = request.createCancelToken();
     try {
-      await request.put('/user/nickname', { data: { nickname }, cancelToken: (this as any)._submitNicknameCancelToken }, true);
+      await request.put('/user/nickname', { data: { nickName: nickname }, cancelToken: (this as any)._submitNicknameCancelToken }, true);
       if (this._isDestroyed) return;
       const baseInfo = request.getBaseInfo() || {};
       request.setBaseInfo({ ...baseInfo, nickName: nickname });
@@ -152,7 +150,6 @@ Page({
       if (error?.message === 'request:abort') return;
       wx.showToast({ title: getErrorMessage(error, (this as any).$t('set.updateFail')), icon: 'none' });
     } finally {
-      (this as any)._submitting = false;
       (this as any)._submitNicknameCancelToken = null;
     }
   },
@@ -293,13 +290,12 @@ Page({
 
   async fetch(cancelToken?: any) {
     try {
-      const [familyConfig, phoneInfo, profileInfo] = await Promise.all([
+      const [, phoneInfo, profileInfo] = await Promise.all([
         request.getFamilyConfig(cancelToken),
         request.get('/auth/phone', { cancelToken }, true),
         request.get('/user/profile', { cancelToken }, true),
       ]);
       (this as any)._safeSetData({
-        familyConfig,
         phone: phoneInfo.data?.phoneNumber || '',
         canModifyToday: phoneInfo.data?.canModifyToday ?? true,
         mpSubscribed: profileInfo.data?.mpSubscribed ?? false,
@@ -464,7 +460,6 @@ Page({
   },
 
   async bindPhone(phoneCode: string) {
-    (this as any)._bindingPhone = true;
     if ((this as any)._bindPhoneCancelToken) {
       try { (this as any)._bindPhoneCancelToken.cancel(); } catch {}
     }
@@ -480,7 +475,6 @@ Page({
       if (error?.message === 'request:abort') return;
       wx.showToast({ title: getErrorMessage(error, (this as any).$t('error.DEFAULT')), icon: 'none' });
     } finally {
-      (this as any)._bindingPhone = false;
       (this as any)._bindPhoneCancelToken = null;
     }
   },

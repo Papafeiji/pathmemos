@@ -2,6 +2,7 @@ import request, { createCancelToken } from './request';
 import { getVipInfo, fetchVipInfo } from './vip';
 import { isIOS } from './util';
 import { logger } from './logger';
+import { opsLog, opsLogFail } from './opslog';
 
 
 const CENTROID_CALC_INTERVAL_MS = 30_000;     
@@ -198,13 +199,15 @@ const _shouldSkipReportDueToBackoff = (): boolean => {
   return Date.now() - _lastReportFailureTime < backoffMs;
 };
 
-const _serialFlushAndReport = async (cancelToken?: any): Promise<void> => {
+const _serialFlushAndReport = async (cancelToken?: any, force = false): Promise<void> => {
+  // PPJ-A02：已有上报在进行时，不能直接返回旧 promise——期间新入队的点会被排除在本轮之外。
+  // 先等旧一轮结束，再用最新 storage 重跑一轮（force=true 时忽略退避，用于关闭前的最后一批）。
   if (_reportPromise) {
-    return _reportPromise;
+    try { await _reportPromise; } catch {}
   }
   _reportPromise = (async () => {
     await _flushToStorage();
-    if (_shouldSkipReportDueToBackoff()) {
+    if (!force && _shouldSkipReportDueToBackoff()) {
       return;
     }
     try {
@@ -234,7 +237,11 @@ const _flushToStorage = async (): Promise<void> => {
       const existing = await _loadFromStorage(true);
       const combined = existing.concat(pointsToFlush);
       if (combined.length > STORAGE_MAX_SIZE) {
-        combined.splice(0, combined.length - STORAGE_MAX_SIZE);
+        const dropped = combined.length - STORAGE_MAX_SIZE;
+        combined.splice(0, dropped);
+        // PPJ-A01：头部淘汰的是最旧的点；同步前移「已上报前缀」计数，
+        // 否则计数大于实际已上报前缀，_tryReportStorage 会跳过未上报的新点并最终误清。
+        _reportedLeadingCount = Math.max(0, _reportedLeadingCount - dropped);
       }
       await new Promise<void>((resolve, reject) => {
         wx.setStorage({
@@ -318,11 +325,11 @@ const _syncBackendConfig = async (enabled: boolean, cancelToken?: any) => {
 
 
 const _isTokenExpiredError = (error: any): boolean => {
+  // 03-api §3：会话失效 = HTTP 401 + code '4010' + biz_code SESSION_INVALID；
+  // skipAuthExpire 请求不走哨兵（http.ts 不清 session），哨兵分支仅覆盖未跳过的调用方。
   const code = error?.data?.code || '';
   const bizCode = error?.data?.biz_code || '';
-  return code === '1006' || code === '9300' || code === '1011' ||
-         bizCode === '1006' || bizCode === '9300' || bizCode === '1011' ||
-         error?.message === '登录已过期' ||
+  return code === '4010' || bizCode === 'SESSION_INVALID' ||
          error?.message === '__ppfj_session_expired__';
 };
 
@@ -343,14 +350,21 @@ const _stopLocationUpdateBackground = () => {
 
 
 const _postTrajectoriesWithSilentRefresh = async (data: any, cancelToken?: any): Promise<any> => {
+  opsLog('auto_upload', { count: Array.isArray(data?.points) ? data.points.length : 0 });
   try {
     return await request.post('/auto-record/trajectories', { data, cancelToken }, true, 10000, true);
   } catch (error: any) {
     if (!_isTokenExpiredError(error)) {
+      opsLogFail('auto_upload_fail', error, { count: Array.isArray(data?.points) ? data.points.length : 0 });
       throw error;
     }
     await request.login(cancelToken);
-    return await request.post('/auto-record/trajectories', { data, cancelToken }, true, 10000, true);
+    try {
+      return await request.post('/auto-record/trajectories', { data, cancelToken }, true, 10000, true);
+    } catch (retryError: any) {
+      opsLogFail('auto_upload_fail', retryError, { count: Array.isArray(data?.points) ? data.points.length : 0, retried: true });
+      throw retryError;
+    }
   }
 };
 
@@ -512,15 +526,21 @@ const _getCurrentLocation = (
 
 
 const _saveFirstRecord = async (): Promise<void> => {
-  const loc = await _getCurrentLocation(10000, { highAccuracy: false, highAccuracyExpireTime: 2000 });
-  const res: any = await request.post('/diary/details/auto', {
-    data: {
-      lat: _roundCoord(loc.latitude),
-      lon: _roundCoord(loc.longitude),
-    },
-  }, true, 10000, true);
-  if (res?.data?.id) {
-    _refreshIndexList();
+  try {
+    const loc = await _getCurrentLocation(10000, { highAccuracy: false, highAccuracyExpireTime: 2000 });
+    const res: any = await request.post('/diary/details/auto', {
+      data: {
+        lat: _roundCoord(loc.latitude),
+        lon: _roundCoord(loc.longitude),
+      },
+    }, true, 10000, true);
+    opsLog('auto_entry_ok', { hasId: !!res?.data?.id });
+    if (res?.data?.id) {
+      _refreshIndexList();
+    }
+  } catch (error: any) {
+    opsLogFail('auto_entry_fail', error);
+    throw error;
   }
 };
 
@@ -965,7 +985,8 @@ export const closeAutoRecord = async (): Promise<void> => {
     // ListPendingAutoRecordUsers 不再处理该用户，最后一批轨迹
     // 会被静默丢弃，导致关闭前最后停留的地点不生成日记。
     try {
-      await _serialFlushAndReport(closeToken);
+      // 关闭前强制上报最后一批（忽略退避），避免开关关闭后这批轨迹被后端清理。
+      await _serialFlushAndReport(closeToken, true);
     } catch {
     }
 
@@ -1077,7 +1098,9 @@ export const tryRestoreAutoRecord = async (): Promise<boolean> => {
     }
 
     // 2. 网络校验：上报积压轨迹、VIP 校验、后端开关校验
-    await _tryReportStorage(token);
+    // R5：恢复路径不得绕过 _serialFlushAndReport 的单飞链直调 _tryReportStorage——
+    // 否则会与 push/close 路径的 _flushToStorage（读-改-写）并发交错，导致驻留点静默丢失或重复上报。
+    await _serialFlushAndReport(token);
 
     let vipInfo;
     try {

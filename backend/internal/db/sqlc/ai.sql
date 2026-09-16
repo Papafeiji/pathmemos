@@ -19,24 +19,6 @@ WHERE id IN (
     LIMIT $1::bigint
 );
 
--- name: DeleteExcessDialogLogs :execrows
-WITH to_delete AS (
-    SELECT id FROM ai_dialog_logs
-    WHERE ai_dialog_logs.user_id = @user_id
-    ORDER BY ai_dialog_logs.created_at ASC
-    OFFSET @offset_count
-    LIMIT @batch_size::bigint
-)
-DELETE FROM ai_dialog_logs
-WHERE ai_dialog_logs.id IN (SELECT id FROM to_delete);
-
--- name: ListUsersWithExcessDialogLogs :many
-SELECT user_id FROM ai_dialog_logs
-GROUP BY user_id
-HAVING COUNT(*) > @min_count::bigint
-ORDER BY user_id
-LIMIT @batch_size::bigint;
-
 -- name: ListDiaryEntriesByDateRange :many
 SELECT
     COALESCE(de.record_time, de.created_at) AS created_at,

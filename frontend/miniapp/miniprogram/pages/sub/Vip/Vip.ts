@@ -163,11 +163,6 @@ Page({
     }
   },
 
-  openPrivacy() {
-    // R2-F16：链接收敛到 config 集中管理。
-    openUrl(`${getHelpBaseURL()}/tutorial/privacy-policy/`);
-  },
-
   openUser() {
     openUrl(`${getHelpBaseURL()}/tutorial/terms-of-use/`);
   },
@@ -448,7 +443,7 @@ Page({
           return;
         }
 
-        if (status === 'failed' || status === 'closed') {
+        if (status === 'closed') {
           this._finishPaying();
           if (!(this as any)._isDestroyed && !(this as any)._isHidden) {
             wx.showToast({ title: (this as any).$t('vip.payStatusFail'), icon: 'none', duration: 2000 });

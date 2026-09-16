@@ -4,6 +4,7 @@ import request from './utils/request';
 import { tryRestoreAutoRecord, onAppShow, onAppHide, STORAGE_KEY_ENABLED } from './utils/autoRecord';
 import { getSystemInfo, clearSystemInfoCache } from './utils/util';
 import { logger } from './utils/logger';
+import { flushOpsLog } from './utils/opslog';
 import { themeManager } from './utils/theme';
 import { i18n } from './utils/i18n';
 import { setPendingInviter } from './utils/storage';
@@ -77,6 +78,9 @@ App<IAppOption>({
     }
 
     this.checkForUpdate();
+
+    // OPS-LOG：打开小程序时上报本地记录的操作日志（失败保留，下次再报）
+    flushOpsLog().catch(() => {});
   },
 
   _resolveSceneAndLogin(sceneValue: string, doLogin: () => void) {

@@ -320,22 +320,23 @@ func (h *Handler) handleTextMessage(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 
-	user, err := h.resolveUser(ctx, fromOpenID)
-	if err != nil {
-		slog.WarnContext(ctx, "resolve wx mp user failed", slog.String("openid", util.MaskID(fromOpenID)), slog.Any("error", err))
-		h.writeReply(ctx, w, fromOpenID, toUserName, wxmpReplyNoUser, timestamp, nonce, encrypted)
-		// Also push a mini-program page card via kf message.
-		h.sendMiniProgramCardAsync(ctx, fromOpenID, "点击小程序授权")
-		return
-	}
-
-	// 返回一个非空被动回复，避免微信因空内容重试导致后台 AI 被多次触发；
-	// 完整答案仍通过客服消息异步分段推送。
+	// FP-P2-05：先立即写非空被动回复（避免微信因空内容重试导致后台 AI 被多次触发），
+	// 满足微信 5s 被动回复窗口；resolveUser 可能含微信 FetchUserInfo HTTP，放到后台执行。
+	// 完整答案仍通过客服消息异步分段推送；未绑定用户改为异步发引导 + 小程序卡片。
 	h.writeReply(ctx, w, fromOpenID, toUserName, wxmpReplyThinking, timestamp, nonce, encrypted)
 
 	safe.Go(ctx, nil, func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), ai.AIStreamTimeout+30*time.Second)
 		defer cancel()
+
+		user, err := h.resolveUser(bgCtx, fromOpenID)
+		if err != nil {
+			slog.WarnContext(bgCtx, "resolve wx mp user failed", slog.String("openid", util.MaskID(fromOpenID)), slog.Any("error", err))
+			//nolint:errcheck
+			_ = h.wxClient.SendKfMessage(bgCtx, fromOpenID, wxmpReplyNoUser)
+			h.sendMiniProgramCardAsync(bgCtx, fromOpenID, "点击小程序授权")
+			return
+		}
 
 		sysCfg, err := h.sysCfgLoader.Load(bgCtx)
 		if err != nil {
